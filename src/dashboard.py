@@ -73,7 +73,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-init_db()
+@st.cache_resource(show_spinner=False)
+def _bootstrap_database():
+    """Inicializa la base de datos una única vez por ciclo del servidor (acelera las recargas)."""
+    init_db()
+    return True
+
+_bootstrap_database()
 
 # Bloquear traducción automática del navegador que rompe nodos del Virtual DOM de React
 components.html(
@@ -1328,47 +1334,55 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
             except Exception as e_fsm:
                 logger.debug(f"Error parseando partido fallback de Flashscore: {e_fsm}")
 
-    canonical_teams = []
-    for m in matches:
-        canonical_teams.append((m.home_team.id, m.home_team.name))
-        canonical_teams.append((m.away_team.id, m.away_team.name))
-    resolver.register_canonical_teams(canonical_teams)
-
     fs_lookup: Dict[tuple[int, int], str] = {}
     entity_links: List[Dict[str, Any]] = []
-    for fsm in fs_matches:
-        rh = resolver.resolve(fsm.home_team_name)
-        ra = resolver.resolve(fsm.away_team_name)
-        if rh and rh.is_confident and ra and ra.is_confident:
-            fs_lookup[(rh.canonical_id, ra.canonical_id)] = fsm.flashscore_id
-            save_team_alias(
-                "flashscore",
-                fsm.home_team_id,
-                fsm.home_team_name,
-                rh.canonical_id,
-                rh.canonical_name,
-                rh.similarity_score,
-            )
-            save_team_alias(
-                "flashscore",
-                fsm.away_team_id,
-                fsm.away_team_name,
-                ra.canonical_id,
-                ra.canonical_name,
-                ra.similarity_score,
-            )
-            entity_links.append(
-                {
-                    "Torneo Flashscore": fsm.tournament_title,
-                    "Flashscore ID": fsm.flashscore_id,
-                    "Local (Flashscore)": fsm.home_team_name,
-                    "Local (Sofascore)": rh.canonical_name,
-                    "Similitud Local (%)": rh.similarity_score,
-                    "Visita (Flashscore)": fsm.away_team_name,
-                    "Visita (Sofascore)": ra.canonical_name,
-                    "Similitud Visita (%)": ra.similarity_score,
-                }
-            )
+
+    if source_label == "Flashscore Cloud":
+        # Optimización Ultra-Rápida: Mapeo directo 1:1 sin sobrecarga de EntityResolver
+        for m in matches:
+            if m.custom_id:
+                fs_lookup[(m.home_team.id, m.away_team.id)] = m.custom_id
+    else:
+        # Cruce fuzzy Sofascore <-> Flashscore con registro canónico
+        canonical_teams = []
+        for m in matches:
+            canonical_teams.append((m.home_team.id, m.home_team.name))
+            canonical_teams.append((m.away_team.id, m.away_team.name))
+        resolver.register_canonical_teams(canonical_teams)
+
+        for fsm in fs_matches:
+            rh = resolver.resolve(fsm.home_team_name)
+            ra = resolver.resolve(fsm.away_team_name)
+            if rh and rh.is_confident and ra and ra.is_confident:
+                fs_lookup[(rh.canonical_id, ra.canonical_id)] = fsm.flashscore_id
+                save_team_alias(
+                    "flashscore",
+                    fsm.home_team_id,
+                    fsm.home_team_name,
+                    rh.canonical_id,
+                    rh.canonical_name,
+                    rh.similarity_score,
+                )
+                save_team_alias(
+                    "flashscore",
+                    fsm.away_team_id,
+                    fsm.away_team_name,
+                    ra.canonical_id,
+                    ra.canonical_name,
+                    ra.similarity_score,
+                )
+                entity_links.append(
+                    {
+                        "Torneo Flashscore": fsm.tournament_title,
+                        "Flashscore ID": fsm.flashscore_id,
+                        "Local (Flashscore)": fsm.home_team_name,
+                        "Local (Sofascore)": rh.canonical_name,
+                        "Similitud Local (%)": rh.similarity_score,
+                        "Visita (Flashscore)": fsm.away_team_name,
+                        "Visita (Sofascore)": ra.canonical_name,
+                        "Similitud Visita (%)": ra.similarity_score,
+                    }
+                )
 
     return {
         "matches": matches,
@@ -2710,6 +2724,42 @@ def main() -> None:
             "🎯 Coberturas Dutching",
         ])
 
+        # Carga ultra-rápida de cuotas reales en paralelo para partidos que aún no las tengan cargadas (fechas futuras / mañana)
+        missing_odds_matches = [m for m in filtered_matches if m.odds is None]
+        if missing_odds_matches:
+            sf_scraper_inst, _ = get_scrapers()
+            def _pull_odds(m_item):
+                try:
+                    m_item.odds = sf_scraper_inst.get_match_odds(
+                        m_item.event_id, 
+                        is_live=m_item.status_type in ("inprogress", "live")
+                    )
+                except Exception:
+                    pass
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as o_exec:
+                list(o_exec.map(_pull_odds, missing_odds_matches[:35]))
+
+        # Botón para activar análisis profundo en lote con IA Opta si aún no están en caché
+        uncached_matches = [m for m in filtered_matches if m.event_id not in st.session_state.get("audited_predictions_cache", {})]
+        if uncached_matches:
+            deep_col1, deep_col2 = st.columns([2.4, 1.6])
+            with deep_col1:
+                st.caption(f"💡 Se cargaron cuotas reales oficiales para **{len(filtered_matches)} partidos** de `{date_str}`. Puedes profundizar el análisis con IA Opta (xG, Fatiga y H2H).")
+            with deep_col2:
+                if st.button("⚡ Analizar Top 8 con IA Opta (xG)", use_container_width=True):
+                    scan_targets = [
+                        (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
+                        for m_item in uncached_matches[:8]
+                    ]
+                    with st.spinner("Ejecutando análisis Opta y Monte Carlo en paralelo..."):
+                        batch_res = analyze_matches_batch_parallel(scan_targets, max_workers=4)
+                        for r in batch_res:
+                            m_res = r["match"]
+                            p_res = r["prediction"]
+                            st.session_state["audited_predictions_cache"][m_res.event_id] = p_res
+                            st.session_state.setdefault("deep_analysis_cache", {})[m_res.event_id] = r
+                    st.rerun()
+
         # Recolectar datos y predicciones de los partidos para alimentar los motores
         matches_odds_list: List[Dict[str, Any]] = []
         value_candidates: List[BetOpportunity] = []
@@ -2754,22 +2804,43 @@ def main() -> None:
                 live_tag = f" [🔴 EN VIVO {live_minute}']"
             else:
                 live_tag = ""
-                # Obtener predicción precalculada pre-match o calcular
+                # Obtener predicción precalculada pre-match si existe en caché
                 pred_cand = st.session_state["audited_predictions_cache"].get(m_cand.event_id)
                 if not pred_cand and m_cand.event_id in st.session_state.get("deep_analysis_cache", {}):
                     pred_cand = st.session_state["deep_analysis_cache"][m_cand.event_id].get("prediction")
-                
-                if not pred_cand:
-                    try:
-                        pred_cand = predict_match_poisson(1.35, 1.10)
-                    except Exception:
-                        continue
 
-                p_h = pred_cand.prob_home_win / 100.0
-                p_d = pred_cand.prob_draw / 100.0
-                p_a = pred_cand.prob_away_win / 100.0
-                p_o25 = getattr(pred_cand, "prob_over_25", 52.0) / 100.0
-                p_btts = getattr(pred_cand, "prob_btts_yes", 50.0) / 100.0
+                if pred_cand:
+                    p_h = pred_cand.prob_home_win / 100.0
+                    p_d = pred_cand.prob_draw / 100.0
+                    p_a = pred_cand.prob_away_win / 100.0
+                    p_o25 = getattr(pred_cand, "prob_over_25", 52.0) / 100.0
+                    p_btts = getattr(pred_cand, "prob_btts_yes", 50.0) / 100.0
+                else:
+                    # Derivar probabilidades base equilibradas a partir de las cuotas reales del mercado
+                    if m_cand.odds and m_cand.odds.home_win and m_cand.odds.draw and m_cand.odds.away_win:
+                        inv_h = 1.0 / m_cand.odds.home_win
+                        inv_d = 1.0 / m_cand.odds.draw
+                        inv_a = 1.0 / m_cand.odds.away_win
+                        tot_inv = inv_h + inv_d + inv_a
+                        p_h = round(inv_h / tot_inv, 3)
+                        p_d = round(inv_d / tot_inv, 3)
+                        p_a = round(inv_a / tot_inv, 3)
+                    else:
+                        p_h, p_d, p_a = 0.44, 0.28, 0.28
+
+                    if m_cand.odds and m_cand.odds.over_2_5 and m_cand.odds.under_2_5:
+                        inv_o = 1.0 / m_cand.odds.over_2_5
+                        inv_u = 1.0 / m_cand.odds.under_2_5
+                        p_o25 = round(inv_o / (inv_o + inv_u), 3)
+                    else:
+                        p_o25 = 0.52
+
+                    if m_cand.odds and getattr(m_cand.odds, "btts_yes", None) and getattr(m_cand.odds, "btts_no", None):
+                        inv_by = 1.0 / m_cand.odds.btts_yes
+                        inv_bn = 1.0 / m_cand.odds.btts_no
+                        p_btts = round(inv_by / (inv_by + inv_bn), 3)
+                    else:
+                        p_btts = 0.50
 
             # Extraer ÚNICAMENTE cuotas reales oficiales de la casa de apuestas (Cero cuotas sintéticas)
             h_odd = m_cand.odds.home_win if (m_cand.odds and m_cand.odds.home_win) else None
