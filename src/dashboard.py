@@ -28,10 +28,32 @@ from src.analytics.predictor import (
     predict_match_poisson,
 )
 from src.models.database import (
+    get_bankroll_ledger_history,
+    get_current_bankroll,
+    get_db_session,
+    get_or_create_initial_bankroll,
+    get_portfolio_bets,
+    get_portfolio_kpis,
     get_precomputed_matches_for_date,
     init_db,
+    record_bankroll_transaction,
+    save_portfolio_bets,
     save_team_alias,
     upsert_match,
+)
+from src.analytics.portfolio_allocator import (
+    AllocatedBet,
+    BetOpportunity,
+    DutchingOpportunity,
+    SurebetOpportunity,
+    find_surebets,
+    optimize_value_bets,
+    solve_dutching,
+)
+from src.analytics.settlement_engine import (
+    SettlementReport,
+    audit_and_settle_open_bets,
+    evaluate_bet,
 )
 from src.models.schemas import (
     LiveMomentumSummarySchema,
@@ -1661,7 +1683,7 @@ def main() -> None:
                 "🎯 Análisis del Partido",
                 "📊 Auditoría de Pronósticos (Aciertos/Fallos)",
                 "🧠 Auto-Aprendizaje e IA Adaptativa",
-                "🎟️ Calculadora Kelly & Gestión de Banca",
+                "💼 Asignador Maestro de Capital & Portafolio",
                 "🔴 En Vivo & Momentum",
                 "🔥 Radar Top Picks",
                 "📋 Catálogo Completo",
@@ -2619,74 +2641,435 @@ def main() -> None:
                 st.dataframe(pd.DataFrame(value_and_smart), use_container_width=True, hide_index=True)
         return
 
-    # MODO 3: GESTIÓN DE BANCA Y CALCULADORA DE KELLY
-    if view_mode == "🎟️ Calculadora Kelly & Gestión de Banca":
-        st.subheader("🎟️ Tu Boleto Personalizado & Gestión de Banca (Criterio de Kelly)")
+    # MODO 3: ASIGNADOR MAESTRO DE CAPITAL & GESTIÓN DE PORTAFOLIO CUANTITATIVO
+    if view_mode == "💼 Asignador Maestro de Capital & Portafolio":
+        st.subheader("💼 Asignador Maestro de Capital & Portafolio Cuantitativo")
         st.caption(
-            "Gestiona el riesgo matemático y calcula el tamaño óptimo de apuesta (Stake) "
-            "según el Criterio Fraccional de Kelly (1/4) para maximizar el crecimiento de tu banca sin arriesgarla."
+            "Arquitectura institucional para gestión de capital, arbitraje seguro (Surebets), "
+            "optimización de valor esperado (+EV con Kelly Fraccional escalado), coberturas Dutching y auditoría contable determinista."
         )
-        slip = st.session_state["bet_slip"]
 
-        b_col1, b_col2 = st.columns([1.4, 1.0])
-        with b_col1:
-            st.markdown("#### 📋 Selecciones en tu Boleto Actual")
-            if not slip:
-                st.info(
-                    "Añade selecciones individuales desde la vista **'🎯 Análisis del Partido'** para calcular su valor esperado (EV+) y el stake óptimo."
-                )
-            else:
-                st.dataframe(pd.DataFrame(slip), use_container_width=True, hide_index=True)
-                if st.button("🗑️ Limpiar Todas las Selecciones", use_container_width=True):
-                    st.session_state["bet_slip"] = []
+        kpis = get_portfolio_kpis()
+        current_bankroll = kpis["current_bankroll"]
+
+        # 1. CABECERA DE BANCA Y PARÁMETROS DE RIESGO
+        st.markdown("### 🏦 Estado de la Banca y Control de Riesgo")
+        bank_c1, bank_c2, bank_c3, bank_c4, bank_c5 = st.columns([1.5, 1.2, 1.2, 1.1, 1.5])
+        with bank_c1:
+            st.metric("💰 Banca Total Actual", f"${current_bankroll:,.2f}")
+        with bank_c2:
+            pnl_val = kpis["total_pnl"]
+            pnl_color = "normal" if pnl_val == 0 else ("inverse" if pnl_val < 0 else "off")
+            st.metric("📈 P&L Neto Acumulado", f"{pnl_val:+,.2f} $")
+        with bank_c3:
+            st.metric("🎯 Yield / ROI Real", f"{kpis['roi_pct']:+.2f}%")
+        with bank_c4:
+            st.metric("🏆 Win Rate", f"{kpis['win_rate_pct']:.1f}%")
+        with bank_c5:
+            with st.popover("💳 Ajustar Fondos (Depósito / Retiro)"):
+                st.markdown("**Registrar Transacción de Capital**")
+                adj_type = st.selectbox("Tipo de Movimiento", ["DEPOSIT", "WITHDRAWAL"], format_func=lambda x: "🟢 Depósito (+)" if x == "DEPOSIT" else "🔴 Retiro (-)")
+                adj_amount = st.number_input("Monto en $", min_value=1.0, value=100.0, step=25.0)
+                adj_desc = st.text_input("Nota / Motivo", value="Ajuste manual de banca")
+                if st.button("Confirmar Movimiento Contable", use_container_width=True):
+                    record_bankroll_transaction(adj_type, adj_amount, adj_desc)
+                    st.success("Transacción registrada en el libro diario.")
                     st.rerun()
 
-        with b_col2:
-            st.markdown("#### 🧮 Calculadora de Stake Óptimo (Kelly Fraccional 1/4)")
-            bankroll = st.number_input("💰 Tu Bankroll / Banca Total ($):", min_value=10.0, value=1000.0, step=50.0)
-
-            if slip:
-                combined_prob = 1.0
-                combined_odd = 1.0
-                for item in slip:
-                    combined_prob *= item["Probabilidad (%)"] / 100.0
-                    combined_odd *= float(item.get("Cuota Justa", 1.5))
-                default_prob = round(combined_prob * 100.0, 1)
-                default_fair_odd = round(100.0 / max(0.5, default_prob), 2)
-                suggested_bookie_odd = round(combined_odd, 2)
-            else:
-                default_prob = 55.0
-                default_fair_odd = 1.82
-                suggested_bookie_odd = 1.95
-
-            calc_prob = st.number_input(
-                "📊 Probabilidad Real Estimada por el Modelo (%):",
-                min_value=1.0,
-                max_value=99.0,
-                value=float(default_prob),
-                step=0.5,
+        st.markdown("#### 🎛️ Disyuntores de Exposición y Perfil del Inversor")
+        p_col1, p_col2, p_col3 = st.columns([1.2, 1.4, 1.4])
+        with p_col1:
+            risk_profile = st.selectbox(
+                "Perfil de Riesgo",
+                ["Conservador", "Equilibrado", "Agresivo"],
+                index=1,
+                help="Conservador = 1/8 Kelly | Equilibrado = 1/4 Kelly | Agresivo = 3/8 Kelly",
             )
-            bookie_odd = st.number_input(
-                f"🏦 Cuota en tu Casa de Apuestas (Cuota mínima justa: {default_fair_odd}):",
-                min_value=1.05,
-                max_value=100.0,
-                value=max(1.05, float(suggested_bookie_odd)),
-                step=0.10,
+        with p_col2:
+            max_daily_exp = st.slider(
+                "Límite de Exposición Diaria (% de la Banca)",
+                min_value=5,
+                max_value=30,
+                value=15,
+                step=1,
+                format="%d%%",
+                help="El total de apuestas del día no excederá este porcentaje acumulado.",
+            )
+        with p_col3:
+            max_budget_usd = round(current_bankroll * (max_daily_exp / 100.0), 2)
+            st.metric("Presupuesto Máximo Hoy", f"${max_budget_usd:,.2f}", f"Máx 4.0% (${current_bankroll * 0.04:,.2f}) por apuesta individual")
+
+        st.divider()
+
+        # 2. PANEL DE GENERACIÓN DE CARTERA DEL DÍA
+        st.markdown("### 📦 Generación de Cartera Óptima del Día")
+        tab_sure, tab_value, tab_dutch = st.tabs([
+            "🛡️ Arbitraje Seguro (0 Riesgo - Surebets)",
+            "📈 Inversiones de Valor (+EV con Kelly)",
+            "🎯 Coberturas Dutching",
+        ])
+
+        # Recolectar datos y predicciones de los partidos para alimentar los motores
+        matches_odds_list: List[Dict[str, Any]] = []
+        value_candidates: List[BetOpportunity] = []
+        dutching_opportunities: List[DutchingOpportunity] = []
+
+        for m_cand in filtered_matches:
+            # Obtener predicción precalculada o calcular
+            pred_cand = st.session_state["audited_predictions_cache"].get(m_cand.event_id)
+            if not pred_cand and m_cand.event_id in st.session_state.get("deep_analysis_cache", {}):
+                pred_cand = st.session_state["deep_analysis_cache"][m_cand.event_id].get("prediction")
+            
+            if not pred_cand:
+                # Predecir de forma ligera si faltaba
+                try:
+                    pred_cand = predict_match_poisson(1.35, 1.10)
+                except Exception:
+                    continue
+
+            # Extraer cuotas disponibles
+            h_odd = m_cand.odds.home_win if (m_cand.odds and m_cand.odds.home_win) else round(100.0 / max(5.0, pred_cand.prob_home_win * 0.94), 2)
+            d_odd = m_cand.odds.draw if (m_cand.odds and m_cand.odds.draw) else round(100.0 / max(5.0, pred_cand.prob_draw * 0.94), 2)
+            a_odd = m_cand.odds.away_win if (m_cand.odds and m_cand.odds.away_win) else round(100.0 / max(5.0, pred_cand.prob_away_win * 0.94), 2)
+
+            o25_odd = round(100.0 / max(5.0, pred_cand.prob_over_25 * 0.95), 2) if hasattr(pred_cand, 'prob_over_25') else 1.90
+            u25_odd = round(100.0 / max(5.0, (100.0 - getattr(pred_cand, 'prob_over_25', 52.0)) * 0.95), 2)
+            btts_y_odd = round(100.0 / max(5.0, getattr(pred_cand, 'prob_btts_yes', 50.0) * 0.95), 2)
+            btts_n_odd = round(100.0 / max(5.0, (100.0 - getattr(pred_cand, 'prob_btts_yes', 50.0)) * 0.95), 2)
+
+            event_label = f"{m_cand.home_team.name} vs {m_cand.away_team.name}"
+
+            matches_odds_list.append({
+                "event_id": m_cand.event_id,
+                "event_name": event_label,
+                "tournament": m_cand.tournament.name,
+                "match_date": date_str,
+                "odds": {
+                    "1X2_HOME": h_odd,
+                    "1X2_DRAW": d_odd,
+                    "1X2_AWAY": a_odd,
+                    "OU_2.5_OVER": o25_odd,
+                    "OU_2.5_UNDER": u25_odd,
+                    "BTTS_YES": btts_y_odd,
+                    "BTTS_NO": btts_n_odd,
+                }
+            })
+
+            # Generar candidatos para Value Bets (+EV)
+            # Victoria Local
+            p_h = pred_cand.prob_home_win / 100.0
+            ev_h = (p_h * h_odd) - 1.0
+            fair_h = round(1.0 / max(0.01, p_h), 2)
+            value_candidates.append(
+                BetOpportunity(
+                    event_id=m_cand.event_id,
+                    event_name=event_label,
+                    tournament=m_cand.tournament.name,
+                    match_date=date_str,
+                    strategy="VALUE_BET",
+                    market_code="1X2_HOME",
+                    pick_name=f"Victoria {m_cand.home_team.name}",
+                    odds_taken=h_odd,
+                    fair_odds=fair_h,
+                    model_probability=round(p_h, 3),
+                    ev_net=round(ev_h, 3),
+                )
             )
 
-            kelly = calculate_kelly_stake(calc_prob, bookie_odd, bankroll, fraction=0.25)
-            st.metric("Valor Esperado Matemático (EV%)", f"{kelly['ev_pct']:+.2f}%")
-            st.metric("Cuota Mínima Justa (Sin Valor)", f"{kelly['fair_odds']:.2f}")
-            if kelly["ev_pct"] > 0:
-                st.success(
-                    f"✅ **APUESTA CON VALOR POSITIVO (EV+)**\n\n"
-                    f"**Stake Recomendado (1/4 Kelly):** `${kelly['stake_amount']:.2f}` (**{kelly['stake_pct']:.2f}%** de tu banca)"
+            # Victoria Visitante
+            p_a = pred_cand.prob_away_win / 100.0
+            ev_a = (p_a * a_odd) - 1.0
+            fair_a = round(1.0 / max(0.01, p_a), 2)
+            value_candidates.append(
+                BetOpportunity(
+                    event_id=m_cand.event_id,
+                    event_name=event_label,
+                    tournament=m_cand.tournament.name,
+                    match_date=date_str,
+                    strategy="VALUE_BET",
+                    market_code="1X2_AWAY",
+                    pick_name=f"Victoria {m_cand.away_team.name}",
+                    odds_taken=a_odd,
+                    fair_odds=fair_a,
+                    model_probability=round(p_a, 3),
+                    ev_net=round(ev_a, 3),
                 )
+            )
+
+            # Over 2.5
+            p_o25 = getattr(pred_cand, 'prob_over_25', 52.0) / 100.0
+            ev_o25 = (p_o25 * o25_odd) - 1.0
+            fair_o25 = round(1.0 / max(0.01, p_o25), 2)
+            value_candidates.append(
+                BetOpportunity(
+                    event_id=m_cand.event_id,
+                    event_name=event_label,
+                    tournament=m_cand.tournament.name,
+                    match_date=date_str,
+                    strategy="VALUE_BET",
+                    market_code="OU_2.5_OVER",
+                    pick_name="Más de 2.5 Goles",
+                    odds_taken=o25_odd,
+                    fair_odds=fair_o25,
+                    model_probability=round(p_o25, 3),
+                    ev_net=round(ev_o25, 3),
+                )
+            )
+
+            # Cobertura Dutching de marcadores o doble oportunidad sintética
+            dutch_picks = [
+                {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
+                {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": pred_cand.prob_draw / 100.0},
+            ]
+            dutch_res = solve_dutching(
+                event_id=m_cand.event_id,
+                event_name=event_label,
+                tournament=m_cand.tournament.name,
+                match_date=date_str,
+                coverage_name="Cobertura 1X Sintética",
+                selections=dutch_picks,
+                target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
+            )
+            if dutch_res and dutch_res.combined_probability >= 0.65:
+                dutching_opportunities.append(dutch_res)
+
+        # TAB 1: ARBITRAJE SEGURO (SUREBETS)
+        with tab_sure:
+            st.markdown("#### 🛡️ Oportunidades de Arbitraje Libre de Riesgo")
+            surebets = find_surebets(matches_odds_list, current_bankroll, min_roi=0.015)
+            if not surebets:
+                st.info("ℹ️ No se detectaron arbitrajes puros con ROI > 1.5% en las cuotas cargadas de hoy. El mercado está alineado.")
             else:
-                st.error(
-                    "⚠️ **CUOTA SIN VALOR MATEMÁTICO (EV-)** — La cuota de la casa es inferior a la probabilidad real. Busca mejor cuota o descarta la apuesta."
+                for sb in surebets:
+                    with st.container(border=True):
+                        sb_c1, sb_c2, sb_c3, sb_c4 = st.columns([1.8, 1.2, 1.2, 1.2])
+                        with sb_c1:
+                            st.markdown(f"**⚽ {sb.event_name}** (`{sb.tournament}`)")
+                            st.caption(f"Mercado: **{sb.market_type}** | Inversa: `{sb.inverse_sum:.4f}`")
+                        with sb_c2:
+                            st.metric("Stake Total", f"${sb.total_stake:.2f}")
+                        with sb_c3:
+                            st.metric("Retorno Seguro", f"${sb.guaranteed_payout:.2f}")
+                        with sb_c4:
+                            st.metric("Ganancia Neta", f"+${sb.guaranteed_profit:.2f}", f"+{sb.roi_pct:.2f}% ROI")
+
+                        # Mostrar desglose de apuestas por rama
+                        leg_cols = st.columns(len(sb.legs))
+                        for idx_leg, leg in enumerate(sb.legs):
+                            with leg_cols[idx_leg]:
+                                st.markdown(f"**{leg.pick_name}**")
+                                st.markdown(f"Cuota: `x{leg.odds:.2f}`")
+                                st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
+                                st.caption(f"Retorno si gana: ${leg.payout:.2f}")
+
+        # TAB 2: INVERSIONES DE VALOR (+EV CON KELLY)
+        with tab_value:
+            st.markdown("#### 📈 Oportunidades +EV con Criterio de Kelly Fraccional Escalado")
+            st.caption("Filtros aplicados: Descarte de varianza para cuotas > 3.50, Hard Cap del 4.0% por apuesta y corte de presupuesto diario.")
+
+            allocated_value_bets = optimize_value_bets(
+                value_candidates,
+                bankroll=current_bankroll,
+                risk_profile=risk_profile,
+                max_exposure=max_daily_exp / 100.0,
+            )
+
+            if not allocated_value_bets:
+                st.info("ℹ️ No hay selecciones que superen el filtro estricto de valor esperado positivo (+EV) para los partidos seleccionados.")
+            else:
+                total_plan_stake = sum(b.stake_amount for b in allocated_value_bets)
+                total_plan_payout = sum(b.potential_payout for b in allocated_value_bets)
+
+                st.markdown(f"**Cartera sugerida:** `{len(allocated_value_bets)} apuestas` | **Capital Total a Invertir:** `${total_plan_stake:,.2f}` | **Retorno Potencial:** `${total_plan_payout:,.2f}`")
+
+                # Grilla de tarjetas de apuestas
+                for b in allocated_value_bets:
+                    with st.container(border=True):
+                        v_c1, v_c2, v_c3, v_c4, v_c5 = st.columns([1.8, 1.0, 1.0, 1.2, 1.2])
+                        with v_c1:
+                            st.markdown(f"**{b.event_name}**")
+                            st.caption(f"🏆 {b.tournament} | Mercado: `{b.market_code}`")
+                        with v_c2:
+                            st.markdown(f"**{b.pick_name}**")
+                            st.caption(f"Prob. Modelo: **{b.model_probability * 100.0:.1f}%**")
+                        with v_c3:
+                            st.markdown(f"Cuota: **`{b.odds_taken:.2f}`**")
+                            st.caption(f"Cuota Justa: `{b.fair_odds:.2f}`")
+                        with v_c4:
+                            st.metric("Monto a Apostar", f"${b.stake_amount:.2f}", f"{b.stake_percentage:.1f}% banca")
+                        with v_c5:
+                            st.metric("Retorno Potencial", f"${b.potential_payout:.2f}", f"EV: +{b.ev_net * 100.0:.1f}%")
+
+                st.markdown("---")
+                # Botón de confirmación con idempotencia
+                if st.button("✅ Confirmar y Guardar Cartera de Valor en la Base de Datos", type="primary", use_container_width=True):
+                    bets_payload = [
+                        {
+                            "event_id": b.event_id,
+                            "event_name": b.event_name,
+                            "tournament": b.tournament,
+                            "match_date": b.match_date,
+                            "strategy": b.strategy,
+                            "market_code": b.market_code,
+                            "pick_name": b.pick_name,
+                            "odds_taken": b.odds_taken,
+                            "fair_odds": b.fair_odds,
+                            "model_probability": b.model_probability,
+                            "stake_amount": b.stake_amount,
+                            "stake_percentage": b.stake_percentage,
+                            "potential_payout": b.potential_payout,
+                        }
+                        for b in allocated_value_bets
+                    ]
+                    saved, skipped = save_portfolio_bets(bets_payload)
+                    if saved > 0:
+                        st.success(f"🎉 **{saved} apuestas guardadas exitosamente** en el portafolio y registradas contablemente en el libro diario.")
+                    if skipped > 0:
+                        st.info(f"ℹ️ {skipped} apuestas ya existían previamente y se omitieron por protección idempotente (anti-duplicados).")
+                    st.rerun()
+
+        # TAB 3: COBERTURAS DUTCHING
+        with tab_dutch:
+            st.markdown("#### 🎯 Coberturas Dutching Balanceadas")
+            st.caption("Distribuye el capital entre resultados excluyentes de alta probabilidad para garantizar un retorno idéntico si cualquiera se cumple.")
+            if not dutching_opportunities:
+                st.info("ℹ️ No se configuraron oportunidades de Dutching para la jornada actual.")
+            else:
+                for d_opp in dutching_opportunities[:5]:
+                    with st.container(border=True):
+                        d_c1, d_c2, d_c3, d_c4 = st.columns([1.8, 1.2, 1.2, 1.2])
+                        with d_c1:
+                            st.markdown(f"**⚽ {d_opp.event_name}** (`{d_opp.tournament}`)")
+                            st.caption(f"Cobertura: **{d_opp.coverage_name}** | Prob. Combinada: `{d_opp.combined_probability * 100.0:.1f}%`")
+                        with d_c2:
+                            st.metric("Stake Total", f"${d_opp.total_stake:.2f}")
+                        with d_c3:
+                            st.metric("Retorno Objetivo", f"${d_opp.target_payout:.2f}")
+                        with d_c4:
+                            st.metric("Ganancia si Acierta", f"+${d_opp.net_profit_if_hit:.2f}", f"+{d_opp.roi_if_hit_pct:.1f}% ROI")
+
+                        d_leg_cols = st.columns(len(d_opp.legs))
+                        for idx_dl, leg in enumerate(d_opp.legs):
+                            with d_leg_cols[idx_dl]:
+                                st.markdown(f"**{leg.pick_name}**")
+                                st.markdown(f"Cuota: `x{leg.odds:.2f}`")
+                                st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
+
+        st.divider()
+
+        # 3. PANEL DE BITÁCORA, AUDITORÍA DE RESULTADOS Y EVOLUCIÓN DE BANCA
+        st.markdown("### 📋 Bitácora y Auditoría Continua de Resultados")
+
+        audit_top_c1, audit_top_c2 = st.columns([1.6, 2.4])
+        with audit_top_c1:
+            st.markdown(f"**Apuestas Activas Pendientes:** `{kpis['pending_count']}` | **Cerradas:** `{kpis['won_count'] + kpis['lost_count'] + kpis['void_count']}`")
+        with audit_top_c2:
+            if st.button("🔄 Auditar Partidos Finalizados & Calibrar Modelo", type="secondary", use_container_width=True):
+                # Proveedor de resultados desde la base de datos o scraping
+                def local_scores_provider(event_id: int, match_date: str) -> Optional[Dict[str, Any]]:
+                    # Buscar en la caché de partidos o base de datos
+                    match_obj = st.session_state["audited_matches_cache"].get(event_id)
+                    if not match_obj:
+                        session_q = get_db_session()
+                        with session_q as sess:
+                            from src.models.database import MatchORM
+                            rec = sess.query(MatchORM).filter_by(event_id=event_id).first()
+                            if rec and rec.home_score is not None:
+                                return {
+                                    "home_score": rec.home_score,
+                                    "away_score": rec.away_score,
+                                    "status": rec.status_type or "finished",
+                                }
+                        return None
+                    return {
+                        "home_score": match_obj.home_score,
+                        "away_score": match_obj.away_score,
+                        "status": match_obj.status_type,
+                    }
+
+                with get_db_session() as db_sess:
+                    report = audit_and_settle_open_bets(db_sess, local_scores_provider)
+
+                if report.settled_count > 0:
+                    st.success(
+                        f"✅ **Auditoría finalizada:** {report.settled_count} apuestas liquidadas "
+                        f"({report.won_count} Ganadas, {report.lost_count} Perdidas, {report.void_count} Anuladas). "
+                        f"**P&L de la ronda:** `${report.total_pnl:+,.2f}`."
+                    )
+                    # Retroalimentar al motor de AutoLearner
+                    from src.analytics.auto_learner import get_auto_learner
+                    learner = get_auto_learner()
+                    settled_dicts = [
+                        {
+                            "market_code": s.market_code,
+                            "status": s.status,
+                            "model_probability": 0.60,
+                            "pnl": s.pnl,
+                        }
+                        for s in report.settled_bets
+                    ]
+                    learn_res = learner.learn_from_settled_portfolio_bets(settled_dicts)
+                    st.info(f"🧠 **AutoLearner calibrado:** {learn_res.get('updated_lines_count', 0)} líneas ajustaron sus multiplicadores empíricos.")
+                else:
+                    st.info(f"ℹ️ Se revisaron {report.total_audited} apuestas pendientes. Ningún partido ha concluido aún para liquidación.")
+                st.rerun()
+
+        # Curva de evolución de la banca
+        ledger_history = get_bankroll_ledger_history(limit=200)
+        if len(ledger_history) >= 2:
+            st.markdown("#### 📈 Curva de Crecimiento de la Banca (Libro Diario Contable)")
+            df_ledger = pd.DataFrame(ledger_history)
+            fig_bankroll = go.Figure()
+            fig_bankroll.add_trace(
+                go.Scatter(
+                    x=df_ledger["timestamp"],
+                    y=df_ledger["resulting_balance"],
+                    mode="lines+markers",
+                    name="Saldo ($)",
+                    line=dict(color="#38bdf8", width=3),
+                    fill="tozeroy",
+                    fillcolor="rgba(56, 189, 248, 0.12)",
                 )
+            )
+            fig_bankroll.update_layout(
+                paper_bgcolor="#0e1726",
+                plot_bgcolor="#0e1726",
+                font=dict(color="#e2e8f0"),
+                margin=dict(l=30, r=30, t=30, b=30),
+                height=320,
+                xaxis=dict(gridcolor="#1e293b", title="Fecha y Hora de la Transacción"),
+                yaxis=dict(gridcolor="#1e293b", title="Saldo Total ($)"),
+            )
+            st.plotly_chart(fig_bankroll, use_container_width=True)
+
+        # Tabla interactiva con filtro de estado
+        st.markdown("#### 📑 Historial Detallado de Apuestas del Portafolio")
+        status_filter = st.selectbox("Filtrar por Estado", ["TODAS", "PENDING", "WON", "LOST", "VOID_PUSH"], format_func=lambda x: {
+            "TODAS": "🔍 Todas las Apuestas",
+            "PENDING": "⏳ Solo Pendientes",
+            "WON": "✅ Solo Ganadas",
+            "LOST": "❌ Solo Perdidas",
+            "VOID_PUSH": "⚪ Solo Anuladas / Reembolsadas",
+        }.get(x, x))
+
+        portfolio_records = get_portfolio_bets(status=status_filter, limit=100)
+        if not portfolio_records:
+            st.caption("No hay registros en la base de datos para el filtro seleccionado.")
+        else:
+            df_bets = pd.DataFrame(portfolio_records)
+            display_cols = [
+                "match_date", "event_name", "strategy", "pick_name",
+                "odds_taken", "stake_amount", "potential_payout", "status", "pnl"
+            ]
+            df_display = df_bets[display_cols].copy()
+            df_display.columns = [
+                "Fecha", "Partido", "Estrategia", "Selección",
+                "Cuota", "Stake ($)", "Retorno ($)", "Estado", "P&L ($)"
+            ]
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+
         return
+
 
     # MODO 1: ANÁLISIS PROFUNDO DEL PARTIDO SELECCIONADO
     target_match = filtered_matches[selected_match_idx]

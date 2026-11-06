@@ -357,6 +357,113 @@ class AutoLearner:
             "db_records_in_ml": ml_p.db_matches_count,
         }
 
+    def learn_from_settled_portfolio_bets(
+        self,
+        settled_bets: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Retroalimenta el motor de aprendizaje a partir de las apuestas reales liquidadas del portafolio.
+        
+        Actualiza:
+        1. Calibración empírica de líneas (penaliza si acierto real < probabilidad modelo).
+        2. Priors beta de Thompson Sampling (premia líneas rentables, penaliza líneas con drawdown).
+        """
+        if not settled_bets:
+            return {"status": "neutral", "message": "No hay apuestas liquidadas para calibrar."}
+
+        # Mapeo de códigos de mercado a líneas canónicas
+        market_mapping = {
+            "1X2_HOME": "🛡️ Doble Oportunidad 1X (Local o Empate)",
+            "1X2_AWAY": "🛡️ Doble Oportunidad X2 (Visitante o Empate)",
+            "OU_1.5_OVER": "⚽ Over 1.5 Goles FT (+1.5)",
+            "OU_2.5_OVER": "⚽ Over 2.5 Goles FT (+2.5)",
+            "OU_2.5_UNDER": "⚽ Under 2.5 Goles FT (-2.5)",
+            "OU_3.5_UNDER": "⚽ Under 3.5 Goles FT (-3.5)",
+            "BTTS_YES": "🔥 Ambos Equipos Anotan: SÍ (BTTS)",
+            "BTTS_NO": "⛔ Ambos Equipos Anotan: NO",
+            "DC_1X": "🛡️ Doble Oportunidad 1X (Local o Empate)",
+            "DC_X2": "🛡️ Doble Oportunidad X2 (Visitante o Empate)",
+        }
+
+        updated_lines: List[str] = []
+        for bet in settled_bets:
+            status = bet.get("status")
+            if status not in ("WON", "LOST"):
+                continue
+
+            m_code = bet.get("market_code", "")
+            target_line = market_mapping.get(m_code)
+            if not target_line:
+                # Buscar por coincidencia parcial en líneas por defecto
+                for default_l in DEFAULT_CANONICAL_LINES:
+                    if m_code.lower() in default_l.lower():
+                        target_line = default_l
+                        break
+            if not target_line:
+                target_line = f"Mercado: {m_code}"
+
+            if target_line not in self.state["lines_calibration"]:
+                self.state["lines_calibration"][target_line] = {
+                    "hits": 0,
+                    "trials": 0,
+                    "observed_win_rate": 0.60,
+                    "avg_predicted_prob": 0.60,
+                    "multiplier": 1.0,
+                    "status": "Inicial",
+                }
+            if target_line not in self.state["bandit_priors"]:
+                self.state["bandit_priors"][target_line] = {
+                    "alpha": 4.0,
+                    "beta": 2.5,
+                    "mean_reward": 0.615,
+                    "status": "Estándar",
+                }
+
+            calib = self.state["lines_calibration"][target_line]
+            bandit = self.state["bandit_priors"][target_line]
+
+            is_hit = 1 if status == "WON" else 0
+            model_prob = float(bet.get("model_probability", 0.60))
+
+            calib["hits"] = calib.get("hits", 0) + is_hit
+            calib["trials"] = calib.get("trials", 0) + 1
+            obs_rate = calib["hits"] / max(1, calib["trials"])
+            calib["observed_win_rate"] = round(obs_rate * 100.0, 1)
+
+            # Calibración: penaliza si acierto real < prob modelo
+            prior_n = 6.0
+            smooth_rate = (calib["hits"] + (prior_n * 0.60)) / (calib["trials"] + prior_n)
+            mult = smooth_rate / max(0.20, model_prob)
+            calib["multiplier"] = round(float(np.clip(mult, 0.75, 1.25)), 3)
+
+            # Thompson Sampling update: +alpha si gana, +beta si pierde
+            if status == "WON":
+                bandit["alpha"] = round(bandit.get("alpha", 4.0) + 1.0, 2)
+            else:
+                bandit["beta"] = round(bandit.get("beta", 2.5) + 1.2, 2)
+            bandit["mean_reward"] = round(bandit["alpha"] / (bandit["alpha"] + bandit["beta"]), 3)
+
+            if obs_rate >= 0.70 and calib["trials"] >= 3:
+                status_str = "🌟 Línea Estrella (Rentable en Portafolio)"
+            elif obs_rate >= 0.52:
+                status_str = "🟢 Línea Estable / Confiable"
+            elif obs_rate >= 0.40:
+                status_str = "🟡 Línea Neutra"
+            else:
+                status_str = "⚠️ Línea Penalizada por Drawdown"
+
+            calib["status"] = status_str
+            bandit["status"] = status_str
+            updated_lines.append(target_line)
+
+        self._save_state()
+        return {
+            "status": "success",
+            "bets_learned": len(settled_bets),
+            "updated_lines_count": len(set(updated_lines)),
+        }
+
+
 
 _GLOBAL_AUTO_LEARNER: Optional[AutoLearner] = None
 
