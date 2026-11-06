@@ -2744,8 +2744,9 @@ def main() -> None:
                 list(o_exec.map(_pull_odds, batch_to_fetch))
 
         # Banner de acción para enriquecer partidos de fechas futuras o no cacheadas
+        is_today = (date_str == date.today().strftime("%Y-%m-%d"))
         uncached_matches = [m for m in filtered_matches if m.event_id not in st.session_state.get("audited_predictions_cache", {})]
-        if uncached_matches and not is_today:
+        if uncached_matches:
             deep_col1, deep_col2 = st.columns([2.5, 1.5])
             with deep_col1:
                 st.caption(f"💡 Se cargaron cuotas reales oficiales para los partidos de `{date_str}`. Para calcular el Valor (+EV) con máxima precisión matemática:")
