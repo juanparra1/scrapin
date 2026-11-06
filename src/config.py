@@ -26,21 +26,73 @@ MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_WORKERS", "6"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Ligas principales en Sofascore (IDs de uniqueTournament oficiales de Sofascore)
+# Competiciones de Élite Seleccionadas (Ligas Top, Copas Nacionales, Torneos Continentales y Selecciones)
 TOP_TOURNAMENTS = {
-    8: {"name": "LaLiga", "country": "Spain"},
+    # --- 1. LIGAS NACIONALES ---
     17: {"name": "Premier League", "country": "England"},
+    8: {"name": "LaLiga", "country": "Spain"},
     23: {"name": "Serie A", "country": "Italy"},
     35: {"name": "Bundesliga", "country": "Germany"},
     34: {"name": "Ligue 1", "country": "France"},
+    11539: {"name": "Primera A (Apertura)", "country": "Colombia"},
+    11542: {"name": "Primera A (Clausura)", "country": "Colombia"},
+    242: {"name": "Major League Soccer (MLS)", "country": "USA"},
+    155: {"name": "Liga Profesional de Fútbol", "country": "Argentina"},
+    955: {"name": "Saudi Pro League", "country": "Saudi Arabia"},
+    52: {"name": "Trendyol Süper Lig", "country": "Turkey"},
+    325: {"name": "Brasileirão Série A", "country": "Brazil"},
+    238: {"name": "Liga Portugal Betclic", "country": "Portugal"},
+    11621: {"name": "Liga MX", "country": "Mexico"},
+    18: {"name": "Championship", "country": "England"},
+
+    # --- 2. COPAS NACIONALES Y SUPERTROFEOS ---
+    19: {"name": "FA Cup", "country": "England"},
+    21: {"name": "EFL Carabao Cup", "country": "England"},
+    401: {"name": "FA Community Shield", "country": "England"},
+    329: {"name": "Copa del Rey", "country": "Spain"},
+    400: {"name": "Supercopa de España", "country": "Spain"},
+    328: {"name": "Coppa Italia", "country": "Italy"},
+    402: {"name": "Supercoppa Italiana", "country": "Italy"},
+    217: {"name": "DFB-Pokal", "country": "Germany"},
+    404: {"name": "DFL-Supercup", "country": "Germany"},
+    335: {"name": "Coupe de France", "country": "France"},
+    405: {"name": "Trophée des Champions", "country": "France"},
+    1335: {"name": "Copa Colombia (BetPlay)", "country": "Colombia"},
+    10825: {"name": "Superliga de Colombia", "country": "Colombia"},
+    495: {"name": "US Open Cup", "country": "USA"},
+    1024: {"name": "Copa Argentina", "country": "Argentina"},
+    11707: {"name": "Copa de la Liga Argentina", "country": "Argentina"},
+    2058: {"name": "King's Cup", "country": "Saudi Arabia"},
+    96: {"name": "Türkiye Kupası", "country": "Turkey"},
+    373: {"name": "Copa do Brasil", "country": "Brazil"},
+    10459: {"name": "Supercopa do Brasil", "country": "Brazil"},
+    336: {"name": "Taça de Portugal", "country": "Portugal"},
+    713: {"name": "Taça da Liga", "country": "Portugal"},
+
+    # --- 3. TORNEOS INTERNACIONALES DE CLUBES ---
     7: {"name": "UEFA Champions League", "country": "Europe"},
     679: {"name": "UEFA Europa League", "country": "Europe"},
     17015: {"name": "UEFA Conference League", "country": "Europe"},
-    384: {"name": "Copa Libertadores", "country": "South America"},
-    325: {"name": "Brasileirão Série A", "country": "Brazil"},
-    155: {"name": "Liga Profesional", "country": "Argentina"},
-    11539: {"name": "Liga BetPlay", "country": "Colombia"},
-    11621: {"name": "Liga MX", "country": "Mexico"},
+    465: {"name": "UEFA Super Cup", "country": "Europe"},
+    384: {"name": "CONMEBOL Libertadores", "country": "South America"},
+    480: {"name": "CONMEBOL Sudamericana", "country": "South America"},
+    490: {"name": "CONMEBOL Recopa", "country": "South America"},
+    357: {"name": "FIFA Club World Cup", "country": "World"},
+    13783: {"name": "Leagues Cup (MLS vs Liga MX)", "country": "North & Central America"},
+    498: {"name": "CONCACAF Champions Cup", "country": "North & Central America"},
+
+    # --- 4. SELECCIONES NACIONALES & AMISTOSOS ---
+    16: {"name": "FIFA World Cup", "country": "World"},
+    377: {"name": "Eliminatorias CONMEBOL (Mundial)", "country": "South America"},
+    110: {"name": "Eliminatorias UEFA (Mundial)", "country": "Europe"},
+    120: {"name": "Eliminatorias CONCACAF (Mundial)", "country": "North & Central America"},
+    1: {"name": "UEFA EURO", "country": "Europe"},
+    112: {"name": "Clasificación UEFA EURO", "country": "Europe"},
+    133: {"name": "Copa América", "country": "South America"},
+    10783: {"name": "UEFA Nations League", "country": "Europe"},
+    14100: {"name": "CONCACAF Nations League", "country": "North & Central America"},
+    130: {"name": "CONCACAF Gold Cup", "country": "North & Central America"},
+    1077: {"name": "Amistosos Internacionales (Selecciones)", "country": "World"},
 }
 
 # Configuración de peticiones y Rate Limiting

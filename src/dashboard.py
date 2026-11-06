@@ -1189,12 +1189,28 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
     # 3. Fallback inteligente a Flashscore si Sofascore está bloqueado o vacío en la nube
     if not matches and fs_matches:
         source_label = "Flashscore Cloud"
+        curated_countries = {
+            "france", "francia", "england", "inglaterra", "spain", "españa",
+            "italy", "italia", "germany", "alemania", "colombia", "usa",
+            "united states", "estados unidos", "argentina", "saudi arabia",
+            "arabia saudita", "turkey", "turquía", "turquia", "brazil",
+            "brasil", "portugal", "mexico", "méxico", "europe", "europa",
+            "south america", "sudamérica", "sudamerica", "world", "mundo",
+            "international", "internacional", "concacaf", "conmebol", "uefa"
+        }
+
         for fsm in fs_matches:
+            parts = fsm.tournament_title.split(":")
+            raw_country = parts[0].strip() if len(parts) > 1 else fsm.country
+            country_clean = raw_country.lower()
+
+            # Si no está marcado "Cargar todas las ligas", filtrar solo por las 12 ligas, copas y torneos internacionales solicitados
+            if not include_all_leagues and not any(c in country_clean for c in curated_countries):
+                continue
+
             numeric_id = abs(hash(fsm.flashscore_id)) % (10**9)
             status_map = {"1": "notstarted", "2": "inprogress", "3": "finished"}
             status_type = status_map.get(fsm.status_code, "notstarted")
-            parts = fsm.tournament_title.split(":")
-            country = parts[0].strip() if len(parts) > 1 else fsm.country
             t_name = parts[1].strip() if len(parts) > 1 else fsm.tournament_title
             home_id = abs(hash(fsm.home_team_name)) % (10**7)
             away_id = abs(hash(fsm.away_team_name)) % (10**7)
@@ -1209,10 +1225,10 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                 tournament=TournamentSchema(
                     id=abs(hash(t_name)) % (10**6),
                     name=t_name,
-                    country=country,
+                    country=raw_country,
                 ),
-                home_team=TeamSchema(id=home_id, name=fsm.home_team_name, country=country),
-                away_team=TeamSchema(id=away_id, name=fsm.away_team_name, country=country),
+                home_team=TeamSchema(id=home_id, name=fsm.home_team_name, country=raw_country),
+                away_team=TeamSchema(id=away_id, name=fsm.away_team_name, country=raw_country),
                 home_score=fsm.home_score,
                 away_score=fsm.away_score,
             )
@@ -1478,9 +1494,9 @@ def main() -> None:
 
         selected_date = st.date_input("📅 1. Selecciona la Fecha", value=date.today())
         include_all = st.toggle(
-            "🌍 Cargar todas las ligas del mundo",
+            "🌍 Cargar ligas globales adicionales",
             value=False,
-            help="Si está desactivado, carga las Top Ligas de Europa y América. Si lo activas, carga todas las ligas activas del día.",
+            help="Por defecto carga el catálogo Élite: 12 Ligas Top (Francia, Inglaterra, España, Italia, Alemania, Colombia, MLS, Argentina, Arabia Saudita, Turquía, Brasil, Portugal), sus Copas Nacionales, Torneos Continentales y Selecciones. Si lo activas, incluye ligas menores de todo el mundo.",
         )
 
         date_str = selected_date.strftime("%Y-%m-%d")

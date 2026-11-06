@@ -1,5 +1,6 @@
 """Extractor de datos de Sofascore + Opta (partidos del día, xG, xGOT, porteros, cuotas, alineaciones, H2H profundo e historial)."""
 
+import concurrent.futures
 import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -88,18 +89,22 @@ class SofascoreScraper(BaseScraperClient):
                 if ut_id in TOP_TOURNAMENTS and ut_id not in active_top_tournaments:
                     active_top_tournaments.append(int(ut_id))
 
-        for ut_id in active_top_tournaments:
+        def _fetch_tourney(ut_id: int):
             t_url = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{date_str}"
-            t_data = self.get_json(t_url, ttl_hours=0.5)
-            if not t_data or "events" not in t_data:
-                continue
-            for raw in t_data["events"]:
-                match_schema = self._parse_event_summary(raw)
-                if match_schema and match_schema.event_id not in seen_event_ids:
-                    event_date = match_schema.start_time_utc.strftime("%Y-%m-%d")
-                    if event_date == date_str or len(t_data["events"]) <= 18:
-                        seen_event_ids.add(match_schema.event_id)
-                        matches.append(match_schema)
+            return self.get_json(t_url, ttl_hours=0.5)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exec_t:
+            results = exec_t.map(_fetch_tourney, active_top_tournaments)
+            for t_data in results:
+                if not t_data or "events" not in t_data:
+                    continue
+                for raw in t_data["events"]:
+                    match_schema = self._parse_event_summary(raw)
+                    if match_schema and match_schema.event_id not in seen_event_ids:
+                        event_date = match_schema.start_time_utc.strftime("%Y-%m-%d")
+                        if event_date == date_str or len(t_data["events"]) <= 18:
+                            seen_event_ids.add(match_schema.event_id)
+                            matches.append(match_schema)
 
         if not only_top_tournaments or not matches:
             for cat_id in active_categories[:18]:
