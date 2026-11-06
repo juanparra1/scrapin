@@ -2716,15 +2716,7 @@ def main() -> None:
 
         st.divider()
 
-        # 2. PANEL DE GENERACIÓN DE CARTERA DEL DÍA
-        st.markdown("### 📦 Generación de Cartera Óptima del Día")
-        tab_sure, tab_value, tab_dutch = st.tabs([
-            "🛡️ Arbitraje Seguro (0 Riesgo - Surebets)",
-            "📈 Inversiones de Valor (+EV con Kelly)",
-            "🎯 Coberturas Dutching",
-        ])
-
-        # Carga ultra-rápida y controlada de cuotas (con memoria de intentos para no repetir peticiones bloqueadas)
+        # 1. Carga ultra-rápida y thread-safe de cuotas (sin tocar st.session_state en hilos secundarios)
         if "attempted_odds_events" not in st.session_state:
             st.session_state["attempted_odds_events"] = set()
 
@@ -2732,10 +2724,15 @@ def main() -> None:
             m for m in filtered_matches
             if m.odds is None and m.event_id not in st.session_state["attempted_odds_events"]
         ]
-        if missing_odds_matches:
+        
+        batch_to_fetch = missing_odds_matches[:20]
+        # Registrar eventos en el hilo principal antes de iniciar el ThreadPool
+        for m_item in batch_to_fetch:
+            st.session_state["attempted_odds_events"].add(m_item.event_id)
+
+        if batch_to_fetch:
             sf_scraper_inst, _ = get_scrapers()
             def _pull_odds(m_item):
-                st.session_state["attempted_odds_events"].add(m_item.event_id)
                 try:
                     m_item.odds = sf_scraper_inst.get_match_odds(
                         m_item.event_id, 
@@ -2743,22 +2740,22 @@ def main() -> None:
                     )
                 except Exception:
                     pass
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as o_exec:
-                list(o_exec.map(_pull_odds, missing_odds_matches[:12]))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as o_exec:
+                list(o_exec.map(_pull_odds, batch_to_fetch))
 
-        # Botón para activar análisis profundo en lote con IA Opta si aún no están en caché
+        # Banner de acción para enriquecer partidos de fechas futuras o no cacheadas
         uncached_matches = [m for m in filtered_matches if m.event_id not in st.session_state.get("audited_predictions_cache", {})]
-        if uncached_matches:
-            deep_col1, deep_col2 = st.columns([2.4, 1.6])
+        if uncached_matches and not is_today:
+            deep_col1, deep_col2 = st.columns([2.5, 1.5])
             with deep_col1:
-                st.caption(f"💡 Se cargaron cuotas reales oficiales para **{len(filtered_matches)} partidos** de `{date_str}`. Puedes profundizar el análisis con IA Opta (xG, Fatiga y H2H).")
+                st.caption(f"💡 Se cargaron cuotas reales oficiales para los partidos de `{date_str}`. Para calcular el Valor (+EV) con máxima precisión matemática:")
             with deep_col2:
                 if st.button("⚡ Analizar Top 8 con IA Opta (xG)", use_container_width=True):
                     scan_targets = [
                         (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
                         for m_item in uncached_matches[:8]
                     ]
-                    with st.spinner("Ejecutando análisis Opta y Monte Carlo en paralelo..."):
+                    with st.spinner("Ejecutando análisis Opta, H2H y Monte Carlo en paralelo..."):
                         batch_res = analyze_matches_batch_parallel(scan_targets, max_workers=4)
                         for r in batch_res:
                             m_res = r["match"]
@@ -2766,6 +2763,14 @@ def main() -> None:
                             st.session_state["audited_predictions_cache"][m_res.event_id] = p_res
                             st.session_state.setdefault("deep_analysis_cache", {})[m_res.event_id] = r
                     st.rerun()
+
+        # 2. PANEL DE GENERACIÓN DE CARTERA DEL DÍA
+        st.markdown("### 📦 Generación de Cartera Óptima del Día")
+        tab_sure, tab_value, tab_dutch = st.tabs([
+            "🛡️ Arbitraje Seguro (0 Riesgo - Surebets)",
+            "📈 Inversiones de Valor (+EV con Kelly)",
+            "🎯 Coberturas Dutching",
+        ])
 
         # Recolectar datos y predicciones de los partidos para alimentar los motores
         matches_odds_list: List[Dict[str, Any]] = []
@@ -3020,7 +3025,23 @@ def main() -> None:
             )
 
             if not allocated_value_bets:
-                st.info("ℹ️ No hay selecciones que superen el filtro estricto de valor esperado positivo (+EV) para los partidos seleccionados.")
+                st.info(f"ℹ️ Aún no se han detectado selecciones con valor (+EV >= 2%) en las cuotas cargadas de `{date_str}`.")
+                uncached_in_tab = [m for m in filtered_matches if m.event_id not in st.session_state.get("audited_predictions_cache", {})]
+                if uncached_in_tab:
+                    st.caption("Para encontrar ventaja matemática sobre la casa (+EV), la IA necesita contrastar las cuotas contra las métricas profundas de xG, fatiga y H2H:")
+                    if st.button("⚡ Ejecutar Análisis de IA Opta (xG) en los Partidos de esta Fecha", type="primary", use_container_width=True, key="btn_run_ai_tab_val"):
+                        scan_targets = [
+                            (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
+                            for m_item in uncached_in_tab[:8]
+                        ]
+                        with st.spinner("Ejecutando análisis Opta, H2H y Monte Carlo en paralelo..."):
+                            batch_res = analyze_matches_batch_parallel(scan_targets, max_workers=4)
+                            for r in batch_res:
+                                m_res = r["match"]
+                                p_res = r["prediction"]
+                                st.session_state["audited_predictions_cache"][m_res.event_id] = p_res
+                                st.session_state.setdefault("deep_analysis_cache", {})[m_res.event_id] = r
+                        st.rerun()
             else:
                 total_plan_stake = sum(b.stake_amount for b in allocated_value_bets)
                 total_plan_payout = sum(b.potential_payout for b in allocated_value_bets)
