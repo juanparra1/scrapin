@@ -10,6 +10,7 @@ from src.models.schemas import (
     MatchDetailSchema,
     PlayerLineupSchema,
     PlayerPropSchema,
+    TeamLineupSchema,
     TournamentSchema,
 )
 
@@ -811,21 +812,49 @@ def compute_team_form(
     )
 
 
-def _compute_injury_penalty(players: Optional[List[PlayerPropSchema]]) -> tuple[float, List[str]]:
-    if not players:
-        return 0.0, []
-
-    total_team_sot = max(1.0, sum(p.sot_per_match for p in players))
+def _compute_injury_penalty(
+    players: Optional[List[PlayerPropSchema]],
+    lineup: Optional[TeamLineupSchema] = None,
+    gk_info: Optional[Dict[str, Any]] = None,
+) -> tuple[float, float, List[str]]:
+    """
+    Calcula la penalización multidimensional por ausencias (Ofensiva + Defensiva):
+    - Analiza goleadores y generadores de xG ausentes.
+    - Inspecciona el reporte oficial de lesiones/sanciones de la alineación de Sofascore.
+    - Evalúa vulnerabilidad en el arco si el arquero titular está ausente o tiene bajo % de atajadas.
+    """
     missing_sot = 0.0
     key_missing_names: List[str] = []
+    total_team_sot = max(1.0, sum(p.sot_per_match for p in (players or [])))
 
-    for p in players:
-        if p.is_missing and (p.sot_per_match >= 0.45 or p.xg_per_match >= 0.18 or p.goals >= 1):
-            missing_sot += p.sot_per_match
-            key_missing_names.append(f"{p.name} ({p.sot_per_match} Rem.Arco/P, {p.goals}G)")
+    # 1. Bajas de Jugadores Clave según estadísticas de remates y xG
+    if players:
+        for p in players:
+            if p.is_missing and (p.sot_per_match >= 0.38 or p.xg_per_match >= 0.15 or p.goals >= 1):
+                missing_sot += p.sot_per_match
+                key_missing_names.append(f"{p.name} ({p.sot_per_match:.1f} SoT/P, {p.goals}G)")
 
-    penalty_ratio = min(0.22, (missing_sot / total_team_sot) * 0.65)
-    return round(penalty_ratio * 100.0, 1), key_missing_names
+    # 2. Bajas Oficiales Reportadas en la Alineación de Sofascore (Lesiones / Sanciones)
+    if lineup and lineup.missing_players:
+        for raw_name in lineup.missing_players:
+            name_clean = raw_name.split("(")[0].strip()
+            if not any(name_clean.lower() in kn.lower() for kn in key_missing_names):
+                key_missing_names.append(f"{raw_name} 🚑")
+                missing_sot += 0.42
+
+    # 3. Penalización Defensiva por Incertidumbre en el Arco
+    defensive_penalty_pct = 0.0
+    if gk_info:
+        save_pct = gk_info.get("save_pct", 70.0)
+        gp = gk_info.get("goals_prevented", 0.0)
+        if save_pct < 64.0 or gp < -0.15:
+            defensive_penalty_pct = 10.0
+            gk_name = gk_info.get("name", "Portero")
+            key_missing_names.append(f"Inseguridad en el Arco: {gk_name} (Atajadas: {save_pct:.0f}%) 🧤⚠️")
+
+    # Tasa ofensiva: penalización máxima del 25%
+    penalty_ratio = min(0.25, (missing_sot / total_team_sot) * 0.70)
+    return round(penalty_ratio * 100.0, 1), defensive_penalty_pct, key_missing_names
 
 
 def _extract_starting_goalkeeper(
@@ -978,15 +1007,6 @@ def predict_match_poisson(
     - Modelo Especializado de Atajadas del Portero (Remates al Arco del Rival × Save% + Media del Arquero)
     - Dixon-Coles + Simulación Monte Carlo (10,000 partidos) + Gradient Boosting ML
     """
-    pen_home_pct, key_missing_home = _compute_injury_penalty(home_players)
-    pen_away_pct, key_missing_away = _compute_injury_penalty(away_players)
-    injury_mult_home = 1.0 - (pen_home_pct / 100.0)
-    injury_mult_away = 1.0 - (pen_away_pct / 100.0)
-
-    rest_diff = home_form.rest_days - away_form.rest_days
-    fatigue_mult_home = 0.94 if home_form.fatigue_index >= 75.0 else (1.03 if rest_diff >= 2.5 else 1.0)
-    fatigue_mult_away = 0.94 if away_form.fatigue_index >= 75.0 else (1.03 if rest_diff <= -2.5 else 1.0)
-
     # Extraer perfil de ambos porteros titulares (Opta Goalkeeping)
     gk_home_info = _extract_starting_goalkeeper(
         match.home_lineup.players if match.home_lineup else None,
@@ -1002,6 +1022,21 @@ def predict_match_poisson(
         away_form.gk_save_pct,
         away_form.gk_goals_prevented_avg,
     )
+
+    pen_home_pct, def_pen_home, key_missing_home = _compute_injury_penalty(
+        home_players, match.home_lineup, gk_home_info
+    )
+    pen_away_pct, def_pen_away, key_missing_away = _compute_injury_penalty(
+        away_players, match.away_lineup, gk_away_info
+    )
+    injury_mult_home = 1.0 - (pen_home_pct / 100.0)
+    injury_mult_away = 1.0 - (pen_away_pct / 100.0)
+    def_leak_home = 1.0 + (def_pen_home / 100.0)
+    def_leak_away = 1.0 + (def_pen_away / 100.0)
+
+    rest_diff = home_form.rest_days - away_form.rest_days
+    fatigue_mult_home = 0.94 if home_form.fatigue_index >= 75.0 else (1.03 if rest_diff >= 2.5 else 1.0)
+    fatigue_mult_away = 0.94 if away_form.fatigue_index >= 75.0 else (1.03 if rest_diff <= -2.5 else 1.0)
 
     # Índice de Peligro en el Área de Opta (Toques en área rival + Tiros dentro del área + Entradas a 3/4)
     raw_danger_h = (home_form.touches_in_box_avg * 1.4) + (home_form.shots_in_box_for_avg * 2.5) + (home_form.final_third_entries_avg * 0.35)
@@ -1114,6 +1149,7 @@ def predict_match_poisson(
         * 1.06
         * elo_multiplier_home
         * injury_mult_home
+        * def_leak_away
         * fatigue_mult_home
         * away_gk_shield_mult
         * urgency_boost_home
@@ -1126,6 +1162,7 @@ def predict_match_poisson(
         * 0.94
         * elo_multiplier_away
         * injury_mult_away
+        * def_leak_home
         * fatigue_mult_away
         * home_gk_shield_mult
         * urgency_boost_away

@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 from sqlalchemy import (
@@ -89,6 +90,21 @@ class MatchRecord(Base):
 
     # JSON extendido (rachas, alineaciones y métricas adicionales)
     extra_data_json = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PrecomputedMatchRecord(Base):
+    __tablename__ = "precomputed_matches"
+
+    event_id = Column(Integer, primary_key=True, autoincrement=False)
+    match_date = Column(String(10), nullable=False, index=True)
+    tournament_name = Column(String(120), nullable=False, index=True)
+    home_team_name = Column(String(120), nullable=False)
+    away_team_name = Column(String(120), nullable=False)
+    status_type = Column(String(40), nullable=False)
+    match_detail_json = Column(Text, nullable=False)
+    prediction_json = Column(Text, nullable=False)
+    deep_analysis_json = Column(Text, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -247,6 +263,70 @@ def save_team_alias(
     except Exception as e:
         session.rollback()
         logger.warning(f"No se pudo guardar alias {external_name} -> {canonical_name}: {e}")
+    finally:
+        session.close()
+
+
+def save_precomputed_analysis(
+    event_id: int,
+    match_date: str,
+    tournament_name: str,
+    home_team_name: str,
+    away_team_name: str,
+    status_type: str,
+    match_detail: dict,
+    prediction: dict,
+    deep_analysis: dict,
+) -> None:
+    """Almacena o actualiza el análisis pre-calculado de un partido en Supabase / SQLite."""
+    session = SessionLocal()
+    try:
+        rec = session.get(PrecomputedMatchRecord, event_id)
+        if not rec:
+            rec = PrecomputedMatchRecord(event_id=event_id, match_date=match_date)
+            session.add(rec)
+        rec.match_date = match_date
+        rec.tournament_name = tournament_name
+        rec.home_team_name = home_team_name
+        rec.away_team_name = away_team_name
+        rec.status_type = status_type
+        rec.match_detail_json = json.dumps(match_detail, default=str, ensure_ascii=False)
+        rec.prediction_json = json.dumps(prediction, default=str, ensure_ascii=False)
+        rec.deep_analysis_json = json.dumps(deep_analysis, default=str, ensure_ascii=False)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.warning(f"Error guardando análisis precalculado para evento {event_id}: {e}")
+    finally:
+        session.close()
+
+
+def get_precomputed_matches_for_date(match_date: str) -> List[Dict[str, Any]]:
+    """Recupera todos los partidos pre-calculados de una fecha directamente desde la base de datos."""
+    session = SessionLocal()
+    try:
+        records = (
+            session.query(PrecomputedMatchRecord)
+            .filter_by(match_date=match_date)
+            .all()
+        )
+        results = []
+        for r in records:
+            results.append({
+                "event_id": r.event_id,
+                "match_date": r.match_date,
+                "tournament_name": r.tournament_name,
+                "home_team_name": r.home_team_name,
+                "away_team_name": r.away_team_name,
+                "status_type": r.status_type,
+                "match_detail": json.loads(r.match_detail_json) if r.match_detail_json else {},
+                "prediction": json.loads(r.prediction_json) if r.prediction_json else {},
+                "deep_analysis": json.loads(r.deep_analysis_json) if r.deep_analysis_json else {},
+            })
+        return results
+    except Exception as e:
+        logger.warning(f"Error consultando partidos precalculados para {match_date}: {e}")
+        return []
     finally:
         session.close()
 

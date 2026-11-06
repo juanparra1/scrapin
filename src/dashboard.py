@@ -29,6 +29,7 @@ from src.analytics.predictor import (
     predict_match_poisson,
 )
 from src.models.database import (
+    get_precomputed_matches_for_date,
     init_db,
     save_team_alias,
     upsert_match,
@@ -1158,7 +1159,66 @@ def plot_market_accuracy_chart(breakdown: Dict[str, Any]) -> go.Figure:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]:
-    """Carga rápida de todos los partidos de la fecha y cruce con Flashscore (con fallback automático)."""
+    """Carga rápida de todos los partidos de la fecha con prioridad de caché Supabase (0.2s) y fallback automático."""
+    # 0. Si no se solicitan todas las ligas del mundo, verificar si ya existen datos precalculados en Supabase
+    if not include_all_leagues:
+        try:
+            precomputed_records = get_precomputed_matches_for_date(date_str)
+            if precomputed_records:
+                matches: List[MatchDetailSchema] = []
+                precomputed_deep_cache: Dict[int, Dict[str, Any]] = {}
+                precomputed_preds: Dict[int, MatchPrediction] = {}
+                fs_lookup: Dict[tuple[int, int], str] = {}
+
+                for r in precomputed_records:
+                    try:
+                        m_obj = MatchDetailSchema.model_validate(r["match_detail"])
+                        matches.append(m_obj)
+
+                        deep_data = r.get("deep_analysis") or {}
+                        pred_obj = None
+                        if r.get("prediction"):
+                            try:
+                                pred_obj = MatchPrediction.model_validate(r["prediction"])
+                                precomputed_preds[m_obj.event_id] = pred_obj
+                            except Exception as pred_err:
+                                logger.warning(f"Error parseando prediccion para {m_obj.event_id}: {pred_err}")
+
+                        fs_id = deep_data.get("flashscore_id", "N/A")
+                        fs_lookup[(m_obj.home_team.id, m_obj.away_team.id)] = fs_id
+
+                        if "home_form" in deep_data and "away_form" in deep_data:
+                            try:
+                                precomputed_deep_cache[m_obj.event_id] = {
+                                    "match": m_obj,
+                                    "home_form": TeamFormMetrics.model_validate(deep_data["home_form"]),
+                                    "away_form": TeamFormMetrics.model_validate(deep_data["away_form"]),
+                                    "home_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("home_recent", [])],
+                                    "away_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("away_recent", [])],
+                                    "home_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("home_players", [])],
+                                    "away_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("away_players", [])],
+                                    "prediction": pred_obj,
+                                    "standings_map": deep_data.get("standings_map", {}),
+                                    "flashscore_id": fs_id,
+                                }
+                            except Exception as dec_err:
+                                logger.debug(f"Error decodificando deep data para {m_obj.event_id}: {dec_err}")
+                    except Exception as err:
+                        logger.warning(f"Error deserializando partido precalculado {r.get('event_id')}: {err}")
+
+                if matches:
+                    return {
+                        "matches": matches,
+                        "fs_total": len(matches),
+                        "fs_lookup": fs_lookup,
+                        "entity_links": [],
+                        "source": "⚡ Supabase Cloud Cache (Ultra Rápido)",
+                        "precomputed_deep_cache": precomputed_deep_cache,
+                        "precomputed_predictions": precomputed_preds,
+                    }
+        except Exception as e:
+            logger.warning(f"Error consultando caché de Supabase: {e}")
+
     sf_scraper, fs_scraper = get_scrapers()
     resolver = EntityResolver(confidence_threshold=78.0)
 
@@ -1200,39 +1260,42 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
         }
 
         for fsm in fs_matches:
-            parts = fsm.tournament_title.split(":")
-            raw_country = parts[0].strip() if len(parts) > 1 else fsm.country
-            country_clean = raw_country.lower()
+            try:
+                parts = fsm.tournament_title.split(":")
+                raw_country = parts[0].strip() if len(parts) > 1 else fsm.country
+                country_clean = raw_country.lower()
 
-            # Si no está marcado "Cargar todas las ligas", filtrar solo por las 12 ligas, copas y torneos internacionales solicitados
-            if not include_all_leagues and not any(c in country_clean for c in curated_countries):
-                continue
+                # Si no está marcado "Cargar todas las ligas", filtrar solo por las 12 ligas, copas y torneos internacionales solicitados
+                if not include_all_leagues and not any(c in country_clean for c in curated_countries):
+                    continue
 
-            numeric_id = abs(hash(fsm.flashscore_id)) % (10**9)
-            status_map = {"1": "notstarted", "2": "inprogress", "3": "finished"}
-            status_type = status_map.get(fsm.status_code, "notstarted")
-            t_name = parts[1].strip() if len(parts) > 1 else fsm.tournament_title
-            home_id = abs(hash(fsm.home_team_name)) % (10**7)
-            away_id = abs(hash(fsm.away_team_name)) % (10**7)
+                numeric_id = abs(hash(fsm.flashscore_id)) % (10**9)
+                status_map = {"1": "notstarted", "2": "inprogress", "3": "finished"}
+                status_type = status_map.get(fsm.status_code, "notstarted")
+                t_name = parts[1].strip() if len(parts) > 1 else fsm.tournament_title
+                home_id = abs(hash(fsm.home_team_name)) % (10**7)
+                away_id = abs(hash(fsm.away_team_name)) % (10**7)
 
-            m_obj = MatchDetailSchema(
-                event_id=numeric_id,
-                custom_id=fsm.flashscore_id,
-                slug=f"{fsm.home_team_name.lower().replace(' ', '-')}-vs-{fsm.away_team_name.lower().replace(' ', '-')}",
-                start_timestamp=fsm.start_timestamp,
-                start_time_utc=fsm.start_time_utc,
-                status_type=status_type,
-                tournament=TournamentSchema(
-                    id=abs(hash(t_name)) % (10**6),
-                    name=t_name,
-                    country=raw_country,
-                ),
-                home_team=TeamSchema(id=home_id, name=fsm.home_team_name, country=raw_country),
-                away_team=TeamSchema(id=away_id, name=fsm.away_team_name, country=raw_country),
-                home_score=fsm.home_score,
-                away_score=fsm.away_score,
-            )
-            matches.append(m_obj)
+                m_obj = MatchDetailSchema(
+                    event_id=numeric_id,
+                    custom_id=fsm.flashscore_id,
+                    slug=f"{fsm.home_team_name.lower().replace(' ', '-')}-vs-{fsm.away_team_name.lower().replace(' ', '-')}",
+                    start_timestamp=fsm.start_timestamp,
+                    start_time_utc=fsm.start_time_utc,
+                    status_type=status_type,
+                    tournament=TournamentSchema(
+                        id=abs(hash(t_name)) % (10**6),
+                        name=t_name,
+                        country=raw_country,
+                    ),
+                    home_team=TeamSchema(id=home_id, name=fsm.home_team_name, country=raw_country),
+                    away_team=TeamSchema(id=away_id, name=fsm.away_team_name, country=raw_country),
+                    home_score=fsm.home_score,
+                    away_score=fsm.away_score,
+                )
+                matches.append(m_obj)
+            except Exception as e_fsm:
+                logger.debug(f"Error parseando partido fallback de Flashscore: {e_fsm}")
 
     canonical_teams = []
     for m in matches:
@@ -1502,6 +1565,16 @@ def main() -> None:
         date_str = selected_date.strftime("%Y-%m-%d")
         catalog = load_day_catalog(date_str, include_all)
         all_matches: List[MatchDetailSchema] = catalog["matches"]
+
+        # Población automática de caché si proviene de Supabase precalculado (Ultra Rápido)
+        if "precomputed_predictions" in catalog:
+            st.session_state["audited_predictions_cache"].update(catalog["precomputed_predictions"])
+        if "precomputed_deep_cache" in catalog:
+            if "deep_analysis_cache" not in st.session_state:
+                st.session_state["deep_analysis_cache"] = {}
+            st.session_state["deep_analysis_cache"].update(catalog["precomputed_deep_cache"])
+        for m in all_matches:
+            st.session_state["audited_matches_cache"][m.event_id] = m
 
         tournaments_available = sorted(
             list({f"{m.tournament.name} ({m.tournament.country or 'Int'})" for m in all_matches})
@@ -2761,7 +2834,10 @@ def main() -> None:
     target_match = filtered_matches[selected_match_idx]
     fs_id = catalog["fs_lookup"].get((target_match.home_team.id, target_match.away_team.id), "N/A")
 
-    deep = analyze_single_match_deep(target_match.model_dump(), fs_id)
+    if "deep_analysis_cache" in st.session_state and target_match.event_id in st.session_state["deep_analysis_cache"]:
+        deep = st.session_state["deep_analysis_cache"][target_match.event_id]
+    else:
+        deep = analyze_single_match_deep(target_match.model_dump(), fs_id)
 
     m: MatchDetailSchema = deep["match"]
     hf: TeamFormMetrics = deep["home_form"]
