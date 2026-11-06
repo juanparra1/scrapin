@@ -1,7 +1,10 @@
 """Persistencia en SQLite mediante SQLAlchemy para almacenar equipos, partidos y estadísticas."""
 
 import json
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import (
     Column,
     DateTime,
@@ -136,6 +139,9 @@ def upsert_match(match: MatchDetailSchema) -> None:
                 existing_team.short_name = team.short_name or existing_team.short_name
                 existing_team.country = team.country or existing_team.country
 
+        # Forzar flush para que los equipos existan y respeten la clave foránea antes de insertar MatchRecord
+        session.flush()
+
         extra_payload = {
             "streaks": match.streaks,
             "home_lineup": match.home_lineup.model_dump() if match.home_lineup else None,
@@ -186,9 +192,9 @@ def upsert_match(match: MatchDetailSchema) -> None:
 
         record.extra_data_json = json.dumps(extra_payload, ensure_ascii=False)
         session.commit()
-    except Exception:
+    except Exception as e:
         session.rollback()
-        raise
+        logger.warning(f"Error upserting match {match.event_id}: {e}")
     finally:
         session.close()
 
@@ -201,9 +207,21 @@ def save_team_alias(
     canonical_name: str,
     similarity_score: float,
 ) -> None:
-    """Registra o actualiza una equivalencia de equipo entre plataformas en SQLite."""
+    """Registra o actualiza una equivalencia de equipo entre plataformas en la base de datos."""
     session = SessionLocal()
     try:
+        # Asegurar que el equipo canónico exista primero en teams para respetar la ForeignKey en PostgreSQL
+        existing_team = session.get(TeamRecord, canonical_team_id)
+        if not existing_team:
+            session.add(
+                TeamRecord(
+                    id=canonical_team_id,
+                    name=canonical_name,
+                    short_name=canonical_name[:60] if canonical_name else None,
+                )
+            )
+            session.flush()
+
         existing = (
             session.query(TeamAliasRecord)
             .filter_by(source=source, external_name=external_name)
@@ -226,9 +244,9 @@ def save_team_alias(
             existing.similarity_score = similarity_score
             existing.external_id = external_id or existing.external_id
         session.commit()
-    except Exception:
+    except Exception as e:
         session.rollback()
-        raise
+        logger.warning(f"No se pudo guardar alias {external_name} -> {canonical_name}: {e}")
     finally:
         session.close()
 
