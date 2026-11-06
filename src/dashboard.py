@@ -66,6 +66,26 @@ from src.models.schemas import (
 from src.scrapers.flashscore import FlashscoreScraper
 from src.scrapers.sofascore import SofascoreScraper
 
+COLOMBIA_TZ = timezone(timedelta(hours=-5))
+
+
+def format_colombia_time(dt_or_ts: Any, fmt: str = "%H:%M") -> str:
+    """Convierte un timestamp o datetime UTC a la hora oficial de Colombia (UTC-5)."""
+    if dt_or_ts is None:
+        return "--:--"
+    try:
+        if isinstance(dt_or_ts, (int, float)):
+            dt = datetime.fromtimestamp(dt_or_ts, tz=COLOMBIA_TZ)
+            return dt.strftime(fmt)
+        elif isinstance(dt_or_ts, datetime):
+            if dt_or_ts.tzinfo is None:
+                dt_or_ts = dt_or_ts.replace(tzinfo=timezone.utc)
+            return dt_or_ts.astimezone(COLOMBIA_TZ).strftime(fmt)
+    except Exception:
+        pass
+    return "--:--"
+
+
 st.set_page_config(
     page_title="ProSports AI v3 — Live Momentum, Monte Carlo, ML & Jugadores",
     page_icon="⚽",
@@ -1655,7 +1675,8 @@ def main() -> None:
                 elif m.status_type == "inprogress":
                     st_tag = f"[{m.home_score}-{m.away_score} VIVO]"
                 else:
-                    st_tag = m.start_time_utc.strftime("%H:%M")
+                    col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, "%H:%M")
+                    st_tag = f"[{col_time} COL]"
                 match_options.append(
                     f"{st_tag} | {m.home_team.name} vs {m.away_team.name} ({m.tournament.name})"
                 )
@@ -2368,7 +2389,8 @@ def main() -> None:
             elif m.status_type == "inprogress":
                 estado = f"En Juego ({m.home_score} - {m.away_score})"
             else:
-                estado = m.start_time_utc.strftime("%H:%M UTC")
+                col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, "%H:%M")
+                estado = f"{col_time} (Hora Colombia)"
 
             schedule_rows.append(
                 {
@@ -3262,7 +3284,13 @@ def main() -> None:
     elif m.status_type == "inprogress":
         score_center_html = f"<div style='font-size:2.5rem; font-weight:900; color:#facc15;'>{m.home_score} - {m.away_score}</div><div style='font-size:0.80rem; color:#facc15;'>EN JUEGO</div>"
     else:
-        score_center_html = f"<div style='font-size:2.0rem; font-weight:900; color:#38bdf8;'>VS</div><div style='font-size:0.9rem; color:#cbd5e1;'>{m.start_time_utc.strftime('%H:%M UTC')}</div>"
+        col_time_12h = format_colombia_time(m.start_timestamp or m.start_time_utc, "%I:%M %p")
+        col_time_24h = format_colombia_time(m.start_timestamp or m.start_time_utc, "%H:%M")
+        score_center_html = (
+            f"<div style='font-size:2.0rem; font-weight:900; color:#38bdf8;'>VS</div>"
+            f"<div style='font-size:0.95rem; font-weight:700; color:#f8fafc;'>🇨🇴 {col_time_12h} ({col_time_24h})</div>"
+            f"<div style='font-size:0.75rem; color:#94a3b8;'>Hora Oficial Colombia (UTC-5)</div>"
+        )
 
     h_pos = s_map.get(m.home_team.id, {}).get("position")
     a_pos = s_map.get(m.away_team.id, {}).get("position")
@@ -3849,7 +3877,7 @@ def main() -> None:
                 crn_f = (rm.stats.corner_kicks_home if is_h else rm.stats.corner_kicks_away) if rm.stats else None
                 rows_r.append(
                     {
-                        "Fecha": rm.start_time_utc.strftime("%Y-%m-%d"),
+                        "Fecha": format_colombia_time(rm.start_timestamp or rm.start_time_utc, "%Y-%m-%d"),
                         "Condición": venue,
                         "Rival": opp,
                         "Resultado": f"{gf}-{ga}",

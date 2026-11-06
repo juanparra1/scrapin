@@ -1,7 +1,7 @@
 """Punto de entrada CLI para ejecutar Sofascore + Flashscore + EntityResolver + Motor xG/Elo."""
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict
 from rich.console import Console
 from rich.panel import Panel
@@ -171,7 +171,9 @@ def run_pipeline(date_str: str, limit: int = 8, all_leagues: bool = False) -> No
         elif match.status_type == "inprogress":
             status_str = f"[bold yellow]VIVO ({match.home_score}-{match.away_score})[/bold yellow]"
         else:
-            status_str = match.start_time_utc.strftime("%H:%M UTC")
+            tz_col = timezone(timedelta(hours=-5))
+            col_time = datetime.fromtimestamp(match.start_timestamp, tz=tz_col).strftime("%H:%M")
+            status_str = f"[bold cyan]{col_time} COL[/bold cyan]"
 
         odds_str = (
             f"{match.odds.home_win:.2f} / {match.odds.draw:.2f} / {match.odds.away_win:.2f}"
