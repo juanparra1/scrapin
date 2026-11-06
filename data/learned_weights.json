@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "created_at": "2026-11-06T12:45:36.038625",
+  "last_updated": "2026-11-06T12:46:55.568421",
+  "total_matches_learned": 4,
+  "learned_sessions_count": 1,
+  "ensemble_weights": {
+    "weight_dixon_coles": 0.639,
+    "weight_ml": 0.361
+  },
+  "recent_brier_scores": {
+    "dixon_coles_1x2": 0.1665,
+    "ml_1x2": 0.1223
+  },
+  "lines_calibration": {
+    "⚽ Over 1.5 Goles FT (+1.5)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 84.5,
+      "multiplier": 0.78,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Over 2.5 Goles FT (+2.5)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 63.6,
+      "multiplier": 0.89,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Under 2.5 Goles FT (-2.5)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 36.4,
+      "multiplier": 1.22,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Under 3.5 Goles FT (-3.5)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 58.3,
+      "multiplier": 0.972,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🔥 Ambos Equipos Anotan: SÍ (BTTS)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 57.5,
+      "multiplier": 0.986,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⛔ Ambos Equipos Anotan: NO": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 42.5,
+      "multiplier": 1.22,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⏱️ Over 0.5 Goles 1H (+0.5 1er Tiempo)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 78.2,
+      "multiplier": 0.831,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "⏱️ Under 1.5 Goles 1H (-1.5 1er Tiempo)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 54.7,
+      "multiplier": 1.188,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🚩 Over 6.5 Córners (+6.5 Tiros de Esquina)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 94.8,
+      "multiplier": 0.78,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🚩 Over 7.5 Córners (+7.5 Tiros de Esquina)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 90.2,
+      "multiplier": 0.78,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🚩 Over 8.5 Córners (+8.5 Tiros de Esquina)": {
+      "hits": 1,
+      "trials": 4,
+      "observed_win_rate": 25.0,
+      "avg_predicted_prob": 83.5,
+      "multiplier": 0.78,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🚩 Over 9.5 Córners (+9.5 Tiros de Esquina)": {
+      "hits": 1,
+      "trials": 4,
+      "observed_win_rate": 25.0,
+      "avg_predicted_prob": 74.8,
+      "multiplier": 0.78,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🚩 Under 10.5 Córners (-10.5 Tiros de Esquina)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 35.4,
+      "multiplier": 1.22,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🎯 Over 6.5 Remates al Arco (+6.5 SoT)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 70.1,
+      "multiplier": 0.809,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🎯 Over 7.5 Remates al Arco (+7.5 SoT)": {
+      "hits": 1,
+      "trials": 4,
+      "observed_win_rate": 25.0,
+      "avg_predicted_prob": 57.7,
+      "multiplier": 0.837,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🎯 Over 8.5 Remates al Arco (+8.5 SoT)": {
+      "hits": 1,
+      "trials": 4,
+      "observed_win_rate": 25.0,
+      "avg_predicted_prob": 45.4,
+      "multiplier": 1.065,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🎯 Under 8.5 Remates al Arco": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 54.6,
+      "multiplier": 1.19,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "💥 Over 20.5 Remates Totales": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 90.2,
+      "multiplier": 0.78,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "💥 Over 22.5 Remates Totales": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 81.6,
+      "multiplier": 0.78,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "💥 Over 24.5 Remates Totales": {
+      "hits": 1,
+      "trials": 4,
+      "observed_win_rate": 25.0,
+      "avg_predicted_prob": 69.7,
+      "multiplier": 0.78,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🟨 Over 3.5 Tarjetas Amarillas": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 67.3,
+      "multiplier": 0.842,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🟨 Over 4.5 Tarjetas Amarillas": {
+      "hits": 0,
+      "trials": 4,
+      "observed_win_rate": 0.0,
+      "avg_predicted_prob": 48.6,
+      "multiplier": 0.823,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🟨 Under 4.5 Tarjetas Amarillas": {
+      "hits": 4,
+      "trials": 4,
+      "observed_win_rate": 100.0,
+      "avg_predicted_prob": 51.4,
+      "multiplier": 1.22,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🧤 Portero: 2+ Atajadas (+1.5 Saves)": {
+      "hits": 4,
+      "trials": 4,
+      "observed_win_rate": 100.0,
+      "avg_predicted_prob": 86.2,
+      "multiplier": 0.85,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🧤 Portero: 3+ Atajadas (+2.5 Saves)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 68.9,
+      "multiplier": 0.943,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🛡️ Doble Oportunidad 1X (Local o Empate)": {
+      "hits": 3,
+      "trials": 4,
+      "observed_win_rate": 75.0,
+      "avg_predicted_prob": 75.8,
+      "multiplier": 0.858,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🛡️ Doble Oportunidad X2 (Visitante o Empate)": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 43.0,
+      "multiplier": 1.22,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Equipo Individual: Over 1.5 Goles": {
+      "hits": 2,
+      "trials": 4,
+      "observed_win_rate": 50.0,
+      "avg_predicted_prob": 62.8,
+      "multiplier": 0.902,
+      "status": "🟡 Línea Moderada (Neutro)"
+    }
+  },
+  "bandit_priors": {
+    "⚽ Over 1.5 Goles FT (+1.5)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Over 2.5 Goles FT (+2.5)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Under 2.5 Goles FT (-2.5)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Under 3.5 Goles FT (-3.5)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🔥 Ambos Equipos Anotan: SÍ (BTTS)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⛔ Ambos Equipos Anotan: NO": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⏱️ Over 0.5 Goles 1H (+0.5 1er Tiempo)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "⏱️ Under 1.5 Goles 1H (-1.5 1er Tiempo)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🚩 Over 6.5 Córners (+6.5 Tiros de Esquina)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🚩 Over 7.5 Córners (+7.5 Tiros de Esquina)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🚩 Over 8.5 Córners (+8.5 Tiros de Esquina)": {
+      "alpha": 4.7,
+      "beta": 4.6,
+      "mean_reward": 0.505,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🚩 Over 9.5 Córners (+9.5 Tiros de Esquina)": {
+      "alpha": 4.7,
+      "beta": 4.6,
+      "mean_reward": 0.505,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🚩 Under 10.5 Córners (-10.5 Tiros de Esquina)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🎯 Over 6.5 Remates al Arco (+6.5 SoT)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🎯 Over 7.5 Remates al Arco (+7.5 SoT)": {
+      "alpha": 4.7,
+      "beta": 4.6,
+      "mean_reward": 0.505,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🎯 Over 8.5 Remates al Arco (+8.5 SoT)": {
+      "alpha": 4.7,
+      "beta": 4.6,
+      "mean_reward": 0.505,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🎯 Under 8.5 Remates al Arco": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "💥 Over 20.5 Remates Totales": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "💥 Over 22.5 Remates Totales": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "💥 Over 24.5 Remates Totales": {
+      "alpha": 4.7,
+      "beta": 4.6,
+      "mean_reward": 0.505,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🟨 Over 3.5 Tarjetas Amarillas": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "🟨 Over 4.5 Tarjetas Amarillas": {
+      "alpha": 4.0,
+      "beta": 5.3,
+      "mean_reward": 0.43,
+      "status": "⚠️ Línea Penalizada por Alta Tasa de Fallo"
+    },
+    "🟨 Under 4.5 Tarjetas Amarillas": {
+      "alpha": 6.8,
+      "beta": 2.5,
+      "mean_reward": 0.731,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🧤 Portero: 2+ Atajadas (+1.5 Saves)": {
+      "alpha": 6.8,
+      "beta": 2.5,
+      "mean_reward": 0.731,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🧤 Portero: 3+ Atajadas (+2.5 Saves)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🛡️ Doble Oportunidad 1X (Local o Empate)": {
+      "alpha": 6.1,
+      "beta": 3.2,
+      "mean_reward": 0.656,
+      "status": "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+    },
+    "🛡️ Doble Oportunidad X2 (Visitante o Empate)": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    },
+    "⚽ Equipo Individual: Over 1.5 Goles": {
+      "alpha": 5.4,
+      "beta": 3.9,
+      "mean_reward": 0.581,
+      "status": "🟡 Línea Moderada (Neutro)"
+    }
+  },
+  "training_history": [
+    {
+      "session_id": 1,
+      "timestamp": "2026-11-06T12:46:55.568421",
+      "matches_processed": 4,
+      "old_weights": {
+        "dixon": 0.65,
+        "ml": 0.35
+      },
+      "new_weights": {
+        "dixon": 0.639,
+        "ml": 0.361
+      },
+      "brier_dixon": 0.1665,
+      "brier_ml": 0.1223,
+      "db_records_in_ml": 140
+    }
+  ]
+}

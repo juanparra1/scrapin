@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentación — ProSports AI v2</title>
+    <style>
+        :root {
+            --bg: #0b1120;
+            --card: #1e293b;
+            --border: #334155;
+            --accent: #38bdf8;
+            --green: #22c55e;
+            --amber: #f59e0b;
+            --text: #f8fafc;
+            --muted: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 40px 20px;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        .hero {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 36px;
+            margin-bottom: 30px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.4);
+        }
+        .badge {
+            display: inline-block;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            padding: 4px 14px;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+        }
+        h1 { font-size: 2.2rem; margin-bottom: 10px; color: #fff; }
+        h2 { font-size: 1.4rem; margin: 28px 0 14px 0; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+        h3 { font-size: 1.1rem; color: #fff; margin-bottom: 8px; }
+        p { color: var(--muted); margin-bottom: 12px; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+            gap: 18px;
+            margin-top: 16px;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 20px;
+        }
+        code, pre {
+            font-family: Consolas, 'Courier New', monospace;
+            background: #0f172a;
+            color: #4ade80;
+            border-radius: 8px;
+        }
+        pre {
+            padding: 16px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            margin: 10px 0 18px 0;
+        }
+        ul { padding-left: 20px; color: var(--muted); }
+        li { margin-bottom: 6px; }
+        li b { color: var(--text); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="hero">
+            <span class="badge">Documentación Oficial v2.0</span>
+            <h1>⚽ ProSports AI — Scraping & Predicción Deportiva</h1>
+            <p>Sistema cuantitativo multi-fuente (Sofascore + Flashscore) con modelo híbrido xG Histórico Real, Rating Elo, Separación Local/Visita, Estadísticas de Árbitro, Remates por Jugador, Criterio de Kelly y Auditoría Automática de Aciertos.</p>
+        </div>
+
+        <h2>🚀 1. Cómo Iniciar la Aplicación</h2>
+        <div class="grid">
+            <div class="card">
+                <h3>Opción 1: Doble Clic (Windows)</h3>
+                <p>Ejecuta directamente el archivo <code>iniciar_dashboard.bat</code> ubicado en la carpeta del proyecto. Abrirá la interfaz web en:</p>
+                <pre>http://localhost:8501</pre>
+            </div>
+            <div class="card">
+                <h3>Opción 2: Terminal / Consola</h3>
+                <p>Para lanzar el Dashboard Web o la versión por consola (CLI):</p>
+                <pre>.\.venv\Scripts\streamlit.exe run src/dashboard.py
+.\.venv\Scripts\python.exe -m src.main --limit 8</pre>
+            </div>
+        </div>
+
+        <h2>🧠 2. Los 8 Mercados y Módulos Inteligentes</h2>
+        <div class="grid">
+            <div class="card">
+                <h3>1. Rendimiento Local vs. Visitante</h3>
+                <p>Pondera con un <b>+40% adicional</b> los partidos jugados en la misma condición (casa para el local, fuera para el visitante) y aplica decaimiento exponencial temporal.</p>
+            </div>
+            <div class="card">
+                <h3>2. Árbitro & Mercado de Tarjetas</h3>
+                <p>Extrae el árbitro asignado y su promedio histórico de tarjetas amarillas y rojas por partido, combinando <b>55% tendencia de equipos + 45% rigor del árbitro</b>.</p>
+            </div>
+            <div class="card">
+                <h3>3. Penalización por Bajas Clave</h3>
+                <p>Cruza los lesionados/ausentes con los líderes de remates al arco y xG del club, reduciendo automáticamente el potencial ofensivo si falta una figura.</p>
+            </div>
+            <div class="card">
+                <h3>4. Remates al Arco & Player Props</h3>
+                <p>Calcula mediante distribución de Poisson individual los jugadores con mayor probabilidad de hacer <b>1+ o 2+ remates al arco</b>, remates totales o marcar gol.</p>
+            </div>
+            <div class="card">
+                <h3>5. Mercados de 1er Tiempo (1H)</h3>
+                <p>Proyecta goles esperados al descanso (<b>+0.5 y +1.5 goles 1H</b>), probabilidades 1X2 de la primera mitad y córners del primer tiempo.</p>
+            </div>
+            <div class="card">
+                <h3>6. Smart Money (Dropping Odds)</h3>
+                <p>Compara las cuotas de apertura contra las cuotas actuales de Sofascore para alertar caídas fuertes de cuota pre-partido.</p>
+            </div>
+            <div class="card">
+                <h3>7. Radar Top Picks & Backtesting (✅/❌)</h3>
+                <p>Escanea la jornada completa para filtrar los pronósticos más seguros (>65%) y verifica automáticamente los aciertos reales en partidos finalizados.</p>
+            </div>
+            <div class="card">
+                <h3>8. Boleto Combinada & Criterio de Kelly</h3>
+                <p>Permite armar combinadas, calcular la probabilidad conjunta real, la cuota mínima justa (EV+) y el porcentaje exacto de banca a apostar (1/4 Kelly).</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
