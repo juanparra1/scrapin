@@ -25,6 +25,7 @@ from src.analytics.predictor import (
     _poisson_prob_over,
     calculate_kelly_stake,
     compute_team_form,
+    predict_live_in_play,
     predict_match_poisson,
 )
 from src.models.database import (
@@ -2715,123 +2716,189 @@ def main() -> None:
         dutching_opportunities: List[DutchingOpportunity] = []
 
         for m_cand in filtered_matches:
-            # Obtener predicción precalculada o calcular
-            pred_cand = st.session_state["audited_predictions_cache"].get(m_cand.event_id)
-            if not pred_cand and m_cand.event_id in st.session_state.get("deep_analysis_cache", {}):
-                pred_cand = st.session_state["deep_analysis_cache"][m_cand.event_id].get("prediction")
-            
-            if not pred_cand:
-                # Predecir de forma ligera si faltaba
-                try:
-                    pred_cand = predict_match_poisson(1.35, 1.10)
-                except Exception:
-                    continue
+            # Determinar si el partido está en juego (In-Play) o es Pre-Match
+            is_live_match = m_cand.status_type in ("inprogress", "live")
+            live_minute = 45
+            live_momentum = 0.0
 
-            # Extraer cuotas disponibles
-            h_odd = m_cand.odds.home_win if (m_cand.odds and m_cand.odds.home_win) else round(100.0 / max(5.0, pred_cand.prob_home_win * 0.94), 2)
-            d_odd = m_cand.odds.draw if (m_cand.odds and m_cand.odds.draw) else round(100.0 / max(5.0, pred_cand.prob_draw * 0.94), 2)
-            a_odd = m_cand.odds.away_win if (m_cand.odds and m_cand.odds.away_win) else round(100.0 / max(5.0, pred_cand.prob_away_win * 0.94), 2)
+            if is_live_match:
+                # Extraer minuto de juego
+                import re
+                min_match = re.search(r"(\d+)", m_cand.status_description or "")
+                if min_match:
+                    live_minute = int(min_match.group(1))
+                elif "ht" in (m_cand.status_description or "").lower() or "half" in (m_cand.status_description or "").lower():
+                    live_minute = 45
 
-            o25_odd = round(100.0 / max(5.0, pred_cand.prob_over_25 * 0.95), 2) if hasattr(pred_cand, 'prob_over_25') else 1.90
-            u25_odd = round(100.0 / max(5.0, (100.0 - getattr(pred_cand, 'prob_over_25', 52.0)) * 0.95), 2)
-            btts_y_odd = round(100.0 / max(5.0, getattr(pred_cand, 'prob_btts_yes', 50.0) * 0.95), 2)
-            btts_n_odd = round(100.0 / max(5.0, (100.0 - getattr(pred_cand, 'prob_btts_yes', 50.0)) * 0.95), 2)
+                # Extraer factor de momentum reciente si existe
+                if m_cand.momentum and m_cand.momentum.points:
+                    recent_pts = m_cand.momentum.points[-5:]
+                    if recent_pts:
+                        avg_val = sum(p.value for p in recent_pts) / len(recent_pts)
+                        live_momentum = max(-1.0, min(1.0, avg_val / 50.0))
 
-            event_label = f"{m_cand.home_team.name} vs {m_cand.away_team.name}"
+                # Calcular predicción adaptativa en vivo
+                live_calc = predict_live_in_play(
+                    home_score=m_cand.home_score if m_cand.home_score is not None else 0,
+                    away_score=m_cand.away_score if m_cand.away_score is not None else 0,
+                    current_minute=live_minute,
+                    lambda_home_full=1.35,
+                    lambda_away_full=1.10,
+                    momentum_factor=live_momentum,
+                )
+                p_h = live_calc["prob_home_win"] / 100.0
+                p_d = live_calc["prob_draw"] / 100.0
+                p_a = live_calc["prob_away_win"] / 100.0
+                p_o25 = live_calc["prob_over_2_5"] / 100.0
+                p_btts = live_calc["prob_btts_yes"] / 100.0
+                live_tag = f" [🔴 EN VIVO {live_minute}']"
+            else:
+                live_tag = ""
+                # Obtener predicción precalculada pre-match o calcular
+                pred_cand = st.session_state["audited_predictions_cache"].get(m_cand.event_id)
+                if not pred_cand and m_cand.event_id in st.session_state.get("deep_analysis_cache", {}):
+                    pred_cand = st.session_state["deep_analysis_cache"][m_cand.event_id].get("prediction")
+                
+                if not pred_cand:
+                    try:
+                        pred_cand = predict_match_poisson(1.35, 1.10)
+                    except Exception:
+                        continue
 
-            matches_odds_list.append({
-                "event_id": m_cand.event_id,
-                "event_name": event_label,
-                "tournament": m_cand.tournament.name,
-                "match_date": date_str,
-                "odds": {
-                    "1X2_HOME": h_odd,
-                    "1X2_DRAW": d_odd,
-                    "1X2_AWAY": a_odd,
-                    "OU_2.5_OVER": o25_odd,
-                    "OU_2.5_UNDER": u25_odd,
-                    "BTTS_YES": btts_y_odd,
-                    "BTTS_NO": btts_n_odd,
-                }
-            })
+                p_h = pred_cand.prob_home_win / 100.0
+                p_d = pred_cand.prob_draw / 100.0
+                p_a = pred_cand.prob_away_win / 100.0
+                p_o25 = getattr(pred_cand, "prob_over_25", 52.0) / 100.0
+                p_btts = getattr(pred_cand, "prob_btts_yes", 50.0) / 100.0
 
-            # Generar candidatos para Value Bets (+EV)
-            # Victoria Local
-            p_h = pred_cand.prob_home_win / 100.0
-            ev_h = (p_h * h_odd) - 1.0
-            fair_h = round(1.0 / max(0.01, p_h), 2)
-            value_candidates.append(
-                BetOpportunity(
+            # Extraer ÚNICAMENTE cuotas reales oficiales de la casa de apuestas (Cero cuotas sintéticas)
+            h_odd = m_cand.odds.home_win if (m_cand.odds and m_cand.odds.home_win) else None
+            d_odd = m_cand.odds.draw if (m_cand.odds and m_cand.odds.draw) else None
+            a_odd = m_cand.odds.away_win if (m_cand.odds and m_cand.odds.away_win) else None
+            o25_odd = m_cand.odds.over_2_5 if (m_cand.odds and m_cand.odds.over_2_5) else None
+            u25_odd = m_cand.odds.under_2_5 if (m_cand.odds and m_cand.odds.under_2_5) else None
+            btts_y_odd = getattr(m_cand.odds, "btts_yes", None) if m_cand.odds else None
+            btts_n_odd = getattr(m_cand.odds, "btts_no", None) if m_cand.odds else None
+
+            event_label = f"{m_cand.home_team.name} vs {m_cand.away_team.name}{live_tag}"
+
+            # Construir mapa de cuotas reales para Arbitraje
+            odds_map: Dict[str, float] = {}
+            if h_odd: odds_map["1X2_HOME"] = h_odd
+            if d_odd: odds_map["1X2_DRAW"] = d_odd
+            if a_odd: odds_map["1X2_AWAY"] = a_odd
+            if o25_odd: odds_map["OU_2.5_OVER"] = o25_odd
+            if u25_odd: odds_map["OU_2.5_UNDER"] = u25_odd
+            if btts_y_odd: odds_map["BTTS_YES"] = btts_y_odd
+            if btts_n_odd: odds_map["BTTS_NO"] = btts_n_odd
+
+            if len(odds_map) >= 2:
+                matches_odds_list.append({
+                    "event_id": m_cand.event_id,
+                    "event_name": event_label,
+                    "tournament": m_cand.tournament.name,
+                    "match_date": date_str,
+                    "odds": odds_map,
+                })
+
+            # Generar candidatos para Value Bets (+EV) con CUOTAS REALES
+            # 1. Victoria Local
+            if h_odd and h_odd > 1.01:
+                ev_h = (p_h * h_odd) - 1.0
+                fair_h = round(1.0 / max(0.01, p_h), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="1X2_HOME",
+                        pick_name=f"Victoria {m_cand.home_team.name}",
+                        odds_taken=h_odd,
+                        fair_odds=fair_h,
+                        model_probability=round(p_h, 3),
+                        ev_net=round(ev_h, 3),
+                    )
+                )
+
+            # 2. Victoria Visitante
+            if a_odd and a_odd > 1.01:
+                ev_a = (p_a * a_odd) - 1.0
+                fair_a = round(1.0 / max(0.01, p_a), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="1X2_AWAY",
+                        pick_name=f"Victoria {m_cand.away_team.name}",
+                        odds_taken=a_odd,
+                        fair_odds=fair_a,
+                        model_probability=round(p_a, 3),
+                        ev_net=round(ev_a, 3),
+                    )
+                )
+
+            # 3. Over 2.5 Goles (Solo si la casa cotiza Over 2.5)
+            if o25_odd and o25_odd > 1.01:
+                ev_o25 = (p_o25 * o25_odd) - 1.0
+                fair_o25 = round(1.0 / max(0.01, p_o25), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="OU_2.5_OVER",
+                        pick_name="Más de 2.5 Goles",
+                        odds_taken=o25_odd,
+                        fair_odds=fair_o25,
+                        model_probability=round(p_o25, 3),
+                        ev_net=round(ev_o25, 3),
+                    )
+                )
+
+            # 4. Ambos Equipos Anotan (Solo si la casa cotiza BTTS)
+            if btts_y_odd and btts_y_odd > 1.01:
+                ev_btts = (p_btts * btts_y_odd) - 1.0
+                fair_btts = round(1.0 / max(0.01, p_btts), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="BTTS_YES",
+                        pick_name="Ambos Anotan: Sí",
+                        odds_taken=btts_y_odd,
+                        fair_odds=fair_btts,
+                        model_probability=round(p_btts, 3),
+                        ev_net=round(ev_btts, 3),
+                    )
+                )
+
+            # 5. Cobertura Dutching de marcadores o doble oportunidad (si existen cuotas reales de 1 y X)
+            if h_odd and d_odd and h_odd > 1.01 and d_odd > 1.01:
+                dutch_picks = [
+                    {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
+                    {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": p_d},
+                ]
+                dutch_res = solve_dutching(
                     event_id=m_cand.event_id,
                     event_name=event_label,
                     tournament=m_cand.tournament.name,
                     match_date=date_str,
-                    strategy="VALUE_BET",
-                    market_code="1X2_HOME",
-                    pick_name=f"Victoria {m_cand.home_team.name}",
-                    odds_taken=h_odd,
-                    fair_odds=fair_h,
-                    model_probability=round(p_h, 3),
-                    ev_net=round(ev_h, 3),
+                    coverage_name="Cobertura 1X Sintética",
+                    selections=dutch_picks,
+                    target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
                 )
-            )
-
-            # Victoria Visitante
-            p_a = pred_cand.prob_away_win / 100.0
-            ev_a = (p_a * a_odd) - 1.0
-            fair_a = round(1.0 / max(0.01, p_a), 2)
-            value_candidates.append(
-                BetOpportunity(
-                    event_id=m_cand.event_id,
-                    event_name=event_label,
-                    tournament=m_cand.tournament.name,
-                    match_date=date_str,
-                    strategy="VALUE_BET",
-                    market_code="1X2_AWAY",
-                    pick_name=f"Victoria {m_cand.away_team.name}",
-                    odds_taken=a_odd,
-                    fair_odds=fair_a,
-                    model_probability=round(p_a, 3),
-                    ev_net=round(ev_a, 3),
-                )
-            )
-
-            # Over 2.5
-            p_o25 = getattr(pred_cand, 'prob_over_25', 52.0) / 100.0
-            ev_o25 = (p_o25 * o25_odd) - 1.0
-            fair_o25 = round(1.0 / max(0.01, p_o25), 2)
-            value_candidates.append(
-                BetOpportunity(
-                    event_id=m_cand.event_id,
-                    event_name=event_label,
-                    tournament=m_cand.tournament.name,
-                    match_date=date_str,
-                    strategy="VALUE_BET",
-                    market_code="OU_2.5_OVER",
-                    pick_name="Más de 2.5 Goles",
-                    odds_taken=o25_odd,
-                    fair_odds=fair_o25,
-                    model_probability=round(p_o25, 3),
-                    ev_net=round(ev_o25, 3),
-                )
-            )
-
-            # Cobertura Dutching de marcadores o doble oportunidad sintética
-            dutch_picks = [
-                {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
-                {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": pred_cand.prob_draw / 100.0},
-            ]
-            dutch_res = solve_dutching(
-                event_id=m_cand.event_id,
-                event_name=event_label,
-                tournament=m_cand.tournament.name,
-                match_date=date_str,
-                coverage_name="Cobertura 1X Sintética",
-                selections=dutch_picks,
-                target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
-            )
-            if dutch_res and dutch_res.combined_probability >= 0.65:
-                dutching_opportunities.append(dutch_res)
+                if dutch_res and dutch_res.combined_probability >= 0.65:
+                    dutching_opportunities.append(dutch_res)
 
         # TAB 1: ARBITRAJE SEGURO (SUREBETS)
         with tab_sure:

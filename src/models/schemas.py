@@ -51,6 +51,16 @@ class OddsSchema(BaseModel):
     under_2_5: Optional[float] = None
     initial_over_2_5: Optional[float] = None
     drop_pct_over_2_5: float = 0.0
+    over_1_5: Optional[float] = None
+    under_1_5: Optional[float] = None
+    over_3_5: Optional[float] = None
+    under_3_5: Optional[float] = None
+    btts_yes: Optional[float] = None
+    btts_no: Optional[float] = None
+    dc_1x: Optional[float] = None
+    dc_x2: Optional[float] = None
+    dc_12: Optional[float] = None
+    is_live: bool = False
     bookmaker_name: str = "Betano / Mercado Oficial"
     raw_markets: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 

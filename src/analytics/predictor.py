@@ -1979,3 +1979,81 @@ def predict_match_poisson(
         league_profile_name=league_profile,
     )
 
+
+
+def predict_live_in_play(
+    home_score: int,
+    away_score: int,
+    current_minute: int,
+    lambda_home_full: float = 1.35,
+    lambda_away_full: float = 1.10,
+    momentum_factor: float = 0.0,
+) -> Dict[str, float]:
+    """
+    Calcula probabilidades EN VIVO (In-Play) mediante Poisson con decaimiento temporal
+    y ajuste dinámico de presión de ataque (Momentum).
+    """
+    minute_clamped = max(1, min(92, current_minute))
+    rem_ratio = max(0.01, (90.0 - minute_clamped) / 90.0)
+
+    # Ajuste suave por momentum reciente (+/- hasta 25%)
+    mom_home_boost = max(0.6, min(1.4, 1.0 + (momentum_factor * 0.25)))
+    mom_away_boost = max(0.6, min(1.4, 1.0 - (momentum_factor * 0.25)))
+
+    rem_lam_home = max(0.01, lambda_home_full * rem_ratio * mom_home_boost)
+    rem_lam_away = max(0.01, lambda_away_full * rem_ratio * mom_away_boost)
+
+    p_home_win = 0.0
+    p_draw = 0.0
+    p_away_win = 0.0
+    p_over_1_5 = 0.0
+    p_over_2_5 = 0.0
+    p_over_3_5 = 0.0
+    p_btts_yes = 0.0
+
+    max_rem_goals = 7
+    for g_h in range(max_rem_goals):
+        p_gh = _poisson_pmf(g_h, rem_lam_home)
+        for g_a in range(max_rem_goals):
+            p_ga = _poisson_pmf(g_a, rem_lam_away)
+            p_joint = p_gh * p_ga
+
+            final_h = home_score + g_h
+            final_a = away_score + g_a
+            tot_g = final_h + final_a
+
+            if final_h > final_a:
+                p_home_win += p_joint
+            elif final_h == final_a:
+                p_draw += p_joint
+            else:
+                p_away_win += p_joint
+
+            if tot_g > 1:
+                p_over_1_5 += p_joint
+            if tot_g > 2:
+                p_over_2_5 += p_joint
+            if tot_g > 3:
+                p_over_3_5 += p_joint
+
+            if final_h > 0 and final_a > 0:
+                p_btts_yes += p_joint
+
+    tot_1x2 = p_home_win + p_draw + p_away_win
+    if tot_1x2 > 0:
+        p_home_win /= tot_1x2
+        p_draw /= tot_1x2
+        p_away_win /= tot_1x2
+
+    return {
+        "prob_home_win": round(p_home_win * 100.0, 1),
+        "prob_draw": round(p_draw * 100.0, 1),
+        "prob_away_win": round(p_away_win * 100.0, 1),
+        "prob_over_1_5": round(min(99.0, max(1.0, p_over_1_5 * 100.0)), 1),
+        "prob_over_2_5": round(min(99.0, max(1.0, p_over_2_5 * 100.0)), 1),
+        "prob_over_3_5": round(min(99.0, max(1.0, p_over_3_5 * 100.0)), 1),
+        "prob_btts_yes": round(min(99.0, max(1.0, p_btts_yes * 100.0)), 1),
+        "rem_lambda_home": round(rem_lam_home, 2),
+        "rem_lambda_away": round(rem_lam_away, 2),
+        "time_remaining_pct": round(rem_ratio * 100.0, 1),
+    }

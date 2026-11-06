@@ -231,7 +231,8 @@ class SofascoreScraper(BaseScraperClient):
             )
 
         if include_odds:
-            match.odds = self.get_match_odds(eid)
+            is_live_match = match.status_type in ("inprogress", "live")
+            match.odds = self.get_match_odds(eid, is_live=is_live_match)
 
         if include_h2h:
             match.h2h = self.get_match_h2h(
@@ -505,20 +506,23 @@ class SofascoreScraper(BaseScraperClient):
 
         return stats
 
-    def get_match_odds(self, event_id: int) -> Optional[OddsSchema]:
-        """Extrae cuotas de apertura vs actuales (Dropping Odds / Smart Money) y probabilidades implícitas."""
+    def get_match_odds(self, event_id: int, is_live: bool = False) -> Optional[OddsSchema]:
+        """Extrae cuotas de apertura vs actuales (Dropping Odds / Smart Money) y probabilidades implícitas.
+        Ajusta el TTL de caché dinámicamente: 30 seg para en vivo, 5 min para pre-match."""
+        ttl = 0.008 if is_live else 0.08  # ~30s en vivo, ~5min pre-match
         url = f"{SOFASCORE_API_BASE}/event/{event_id}/odds/1/all"
-        data = self.get_json(url, ttl_hours=1.0)
+        data = self.get_json(url, ttl_hours=ttl)
         if not data or "markets" not in data:
             return None
 
         odds = OddsSchema()
+        odds.is_live = is_live
         raw_mkts: Dict[str, Dict[str, float]] = {}
         for market in data["markets"]:
             market_id = market.get("marketId")
             market_name_raw = market.get("marketName") or ""
             market_name = market_name_raw.lower()
-            choice_grp = market.get("choiceGroup")
+            choice_grp = str(market.get("choiceGroup") or "")
             choices = market.get("choices", [])
 
             # Guardar mapa completo de cuotas de la casa
@@ -532,6 +536,7 @@ class SofascoreScraper(BaseScraperClient):
             if dec_map:
                 raw_mkts[m_key] = dec_map
 
+            # 1. 1X2 Tiempo Completo
             if market_id == 1 or market_name == "full time":
                 for c in choices:
                     name = c.get("name")
@@ -553,18 +558,52 @@ class SofascoreScraper(BaseScraperClient):
                         if init_dec and dec and init_dec > 0:
                             odds.drop_pct_away = round(((init_dec - dec) / init_dec) * 100.0, 1)
 
-            elif "match goals" in market_name and market.get("choiceGroup") == "2.5":
+            # 2. Goles Totales (Over / Under 1.5, 2.5, 3.5)
+            elif "match goals" in market_name or "total goals" in market_name:
                 for c in choices:
                     name = (c.get("name") or "").lower()
                     dec = _fractional_to_decimal(c.get("fractionalValue"))
                     init_dec = _fractional_to_decimal(c.get("initialFractionalValue")) or dec
-                    if "over" in name:
-                        odds.over_2_5 = dec
-                        odds.initial_over_2_5 = init_dec
-                        if init_dec and dec and init_dec > 0:
-                            odds.drop_pct_over_2_5 = round(((init_dec - dec) / init_dec) * 100.0, 1)
-                    elif "under" in name:
-                        odds.under_2_5 = dec
+                    if choice_grp == "1.5":
+                        if "over" in name:
+                            odds.over_1_5 = dec
+                        elif "under" in name:
+                            odds.under_1_5 = dec
+                    elif choice_grp == "2.5":
+                        if "over" in name:
+                            odds.over_2_5 = dec
+                            odds.initial_over_2_5 = init_dec
+                            if init_dec and dec and init_dec > 0:
+                                odds.drop_pct_over_2_5 = round(((init_dec - dec) / init_dec) * 100.0, 1)
+                        elif "under" in name:
+                            odds.under_2_5 = dec
+                    elif choice_grp == "3.5":
+                        if "over" in name:
+                            odds.over_3_5 = dec
+                        elif "under" in name:
+                            odds.under_3_5 = dec
+
+            # 3. Ambos Equipos Anotan (BTTS)
+            elif "both teams to score" in market_name or market_name == "btts":
+                for c in choices:
+                    name = (c.get("name") or "").lower()
+                    dec = _fractional_to_decimal(c.get("fractionalValue"))
+                    if "yes" in name or "si" in name or name == "y":
+                        odds.btts_yes = dec
+                    elif "no" in name or name == "n":
+                        odds.btts_no = dec
+
+            # 4. Doble Oportunidad
+            elif "double chance" in market_name:
+                for c in choices:
+                    name = (c.get("name") or "").lower().replace(" ", "").replace("/", "")
+                    dec = _fractional_to_decimal(c.get("fractionalValue"))
+                    if "1x" in name:
+                        odds.dc_1x = dec
+                    elif "x2" in name:
+                        odds.dc_x2 = dec
+                    elif "12" in name:
+                        odds.dc_12 = dec
 
         drops = [
             ("Local (1)", odds.drop_pct_home, odds.initial_home_win, odds.home_win),
