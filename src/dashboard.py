@@ -1154,32 +1154,73 @@ def plot_market_accuracy_chart(breakdown: Dict[str, Any]) -> go.Figure:
     return fig
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]:
-    """Carga rápida de todos los partidos de la fecha y cruce con Flashscore."""
+    """Carga rápida de todos los partidos de la fecha y cruce con Flashscore (con fallback automático)."""
     sf_scraper, fs_scraper = get_scrapers()
     resolver = EntityResolver(confidence_threshold=78.0)
 
-    matches = sf_scraper.get_scheduled_events(
-        date_str=date_str, only_top_tournaments=not include_all_leagues
-    )
-    if not matches and not include_all_leagues:
+    # 1. Extraer partidos de Flashscore (CDN global de alta disponibilidad)
+    try:
+        t_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        day_offset = max(-7, min(7, (t_dt - date.today()).days))
+        fs_matches = fs_scraper.get_daily_matches(day_offset=day_offset)
+    except Exception as e:
+        logger.warning(f"Error consultando Flashscore: {e}")
+        fs_matches = []
+
+    # 2. Consultar partidos de Sofascore
+    try:
         matches = sf_scraper.get_scheduled_events(
-            date_str=date_str, only_top_tournaments=False
+            date_str=date_str, only_top_tournaments=not include_all_leagues
         )
+        if not matches and not include_all_leagues:
+            matches = sf_scraper.get_scheduled_events(
+                date_str=date_str, only_top_tournaments=False
+            )
+    except Exception as e:
+        logger.warning(f"Error consultando Sofascore: {e}")
+        matches = []
+
+    source_label = "Sofascore Opta"
+
+    # 3. Fallback inteligente a Flashscore si Sofascore está bloqueado o vacío en la nube
+    if not matches and fs_matches:
+        source_label = "Flashscore Cloud"
+        for fsm in fs_matches:
+            numeric_id = abs(hash(fsm.flashscore_id)) % (10**9)
+            status_map = {"1": "notstarted", "2": "inprogress", "3": "finished"}
+            status_type = status_map.get(fsm.status_code, "notstarted")
+            parts = fsm.tournament_title.split(":")
+            country = parts[0].strip() if len(parts) > 1 else fsm.country
+            t_name = parts[1].strip() if len(parts) > 1 else fsm.tournament_title
+            home_id = abs(hash(fsm.home_team_name)) % (10**7)
+            away_id = abs(hash(fsm.away_team_name)) % (10**7)
+
+            m_obj = MatchDetailSchema(
+                event_id=numeric_id,
+                custom_id=fsm.flashscore_id,
+                slug=f"{fsm.home_team_name.lower().replace(' ', '-')}-vs-{fsm.away_team_name.lower().replace(' ', '-')}",
+                start_timestamp=fsm.start_timestamp,
+                start_time_utc=fsm.start_time_utc,
+                status_type=status_type,
+                tournament=TournamentSchema(
+                    id=abs(hash(t_name)) % (10**6),
+                    name=t_name,
+                    country=country,
+                ),
+                home_team=TeamSchema(id=home_id, name=fsm.home_team_name, country=country),
+                away_team=TeamSchema(id=away_id, name=fsm.away_team_name, country=country),
+                home_score=fsm.home_score,
+                away_score=fsm.away_score,
+            )
+            matches.append(m_obj)
 
     canonical_teams = []
     for m in matches:
         canonical_teams.append((m.home_team.id, m.home_team.name))
         canonical_teams.append((m.away_team.id, m.away_team.name))
     resolver.register_canonical_teams(canonical_teams)
-
-    try:
-        t_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-        day_offset = max(-7, min(7, (t_dt - date.today()).days))
-        fs_matches = fs_scraper.get_daily_matches(day_offset=day_offset)
-    except Exception:
-        fs_matches = []
 
     fs_lookup: Dict[tuple[int, int], str] = {}
     entity_links: List[Dict[str, Any]] = []
@@ -1222,6 +1263,7 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
         "fs_total": len(fs_matches),
         "fs_lookup": fs_lookup,
         "entity_links": entity_links,
+        "source": source_label,
     }
 
 
@@ -1496,6 +1538,18 @@ def main() -> None:
             if st.button("🗑️ Vaciar Boleto de Combinada", use_container_width=True):
                 st.session_state["bet_slip"] = []
                 st.rerun()
+
+        st.divider()
+        from src.config import DATABASE_URL
+        db_badge = "🟢 Supabase (PostgreSQL)" if DATABASE_URL else "🟡 SQLite Local"
+        st.markdown(f"💾 **Base de Datos:** `{db_badge}`")
+        src_badge = catalog.get("source", "Sofascore Opta")
+        st.markdown(f"📡 **Fuente de Datos:** `{src_badge}`")
+        st.markdown(f"📊 **Partidos Disponibles:** `{len(all_matches)}`")
+
+        if st.button("🔄 Forzar Recarga (Limpiar Caché)", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
     # SELECTOR DE MODO SUPERIOR (6 Modos con Auditoría Destacada)
     top_col1, top_col2 = st.columns([1.1, 2.9])
