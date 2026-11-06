@@ -13,7 +13,7 @@ from sqlalchemy import (
     create_engine,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
-from src.config import DB_PATH
+from src.config import DATABASE_URL, DB_PATH
 from src.models.schemas import MatchDetailSchema
 
 Base = declarative_base()
@@ -89,12 +89,29 @@ class MatchRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+if DATABASE_URL:
+    # Conexión optimizada a PostgreSQL en la nube (Supabase) con connection pooling
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        echo=False,
+    )
+else:
+    # Base de datos local SQLite con soporte multihilo
+    engine = create_engine(
+        f"sqlite:///{DB_PATH}",
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 def init_db() -> None:
-    """Inicializa las tablas en la base de datos SQLite."""
+    """Inicializa las tablas en la base de datos (PostgreSQL en Supabase o SQLite local)."""
     Base.metadata.create_all(bind=engine)
 
 

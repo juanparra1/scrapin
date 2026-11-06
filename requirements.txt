@@ -52,3 +52,6 @@ urllib3==2.8.0
 uvicorn==0.54.0
 watchdog==6.0.0
 websockets==17.4
+
+psycopg2-binary==2.9.13
+python-dotenv==1.2.4

@@ -1,11 +1,23 @@
 """Configuración central del proyecto de scraping deportivo."""
 
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 DATA_DIR = BASE_DIR / "data"
 CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DATA_DIR / "sports_analytics.db"
+
+# Base de datos en la nube (Supabase / PostgreSQL) o local (SQLite)
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Concurrencia para enriquecimiento acelerado en paralelo
+MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_WORKERS", "6"))
 
 # Crear directorios necesarios
 DATA_DIR.mkdir(parents=True, exist_ok=True)

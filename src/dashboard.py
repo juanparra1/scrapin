@@ -8,6 +8,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from datetime import date, datetime, timedelta
+import concurrent.futures
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import plotly.express as px
@@ -15,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
+from src.config import MAX_PARALLEL_WORKERS
 from src.analytics.auto_learner import get_auto_learner
 from src.analytics.entity_resolver import EntityResolver
 from src.analytics.predictor import (
@@ -1253,12 +1255,16 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
         else {}
     )
 
-    home_recent = sf_scraper.get_team_recent_matches(
-        match.home_team.id, limit=6, with_stats=True, max_stat_matches=5
-    )
-    away_recent = sf_scraper.get_team_recent_matches(
-        match.away_team.id, limit=6, with_stats=True, max_stat_matches=5
-    )
+    # Peticiones concurrentes del mismo partido (Local y Visitante en paralelo)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_exec:
+        fut_home_rec = inner_exec.submit(
+            sf_scraper.get_team_recent_matches, match.home_team.id, 6, True, 5
+        )
+        fut_away_rec = inner_exec.submit(
+            sf_scraper.get_team_recent_matches, match.away_team.id, 6, True, 5
+        )
+        home_recent = fut_home_rec.result()
+        away_recent = fut_away_rec.result()
 
     home_form = compute_team_form(
         match.home_team.id,
@@ -1282,24 +1288,29 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
     home_missing = match.home_lineup.missing_players if match.home_lineup else []
     away_missing = match.away_lineup.missing_players if match.away_lineup else []
 
-    home_top_players = sf_scraper.get_team_top_players(
-        match.home_team.id,
-        match.home_team.name,
-        ut_id,
-        s_id,
-        missing_names=home_missing,
-        lineup=match.home_lineup,
-        opp_sot_conceded_avg=away_form.shots_on_target_against_avg,
-    )
-    away_top_players = sf_scraper.get_team_top_players(
-        match.away_team.id,
-        match.away_team.name,
-        ut_id,
-        s_id,
-        missing_names=away_missing,
-        lineup=match.away_lineup,
-        opp_sot_conceded_avg=home_form.shots_on_target_against_avg,
-    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_exec:
+        fut_home_pl = inner_exec.submit(
+            sf_scraper.get_team_top_players,
+            match.home_team.id,
+            match.home_team.name,
+            ut_id,
+            s_id,
+            home_missing,
+            match.home_lineup,
+            away_form.shots_on_target_against_avg,
+        )
+        fut_away_pl = inner_exec.submit(
+            sf_scraper.get_team_top_players,
+            match.away_team.id,
+            match.away_team.name,
+            ut_id,
+            s_id,
+            away_missing,
+            match.away_lineup,
+            home_form.shots_on_target_against_avg,
+        )
+        home_top_players = fut_home_pl.result()
+        away_top_players = fut_away_pl.result()
 
     prediction = predict_match_poisson(
         match,
@@ -1311,11 +1322,14 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
 
     upsert_match(match)
 
-    if "audited_predictions_cache" in st.session_state and match.status_type == "finished" and match.home_score is not None:
-        st.session_state["audited_predictions_cache"][match.event_id] = prediction
-        if "audited_matches_cache" not in st.session_state:
-            st.session_state["audited_matches_cache"] = {}
-        st.session_state["audited_matches_cache"][match.event_id] = match
+    try:
+        if "audited_predictions_cache" in st.session_state and match.status_type == "finished" and match.home_score is not None:
+            st.session_state["audited_predictions_cache"][match.event_id] = prediction
+            if "audited_matches_cache" not in st.session_state:
+                st.session_state["audited_matches_cache"] = {}
+            st.session_state["audited_matches_cache"][match.event_id] = match
+    except Exception:
+        pass
 
     return {
         "match": match,
@@ -1329,6 +1343,61 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
         "standings_map": standings_map,
         "flashscore_id": fs_id,
     }
+
+
+def analyze_matches_batch_parallel(
+    match_pairs: List[Any],
+    progress_bar=None,
+    status_text_prefix: str = "Procesando",
+    max_workers: int = MAX_PARALLEL_WORKERS,
+) -> List[Dict[str, Any]]:
+    """
+    Ejecuta el análisis profundo (Opta + H2H + Jugadores + ML) de múltiples partidos
+    en paralelo utilizando un pool de hilos de alto rendimiento.
+    """
+    if not match_pairs:
+        return []
+
+    results_map: Dict[int, Dict[str, Any]] = {}
+    total = len(match_pairs)
+    completed_count = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {}
+        for idx, item in enumerate(match_pairs):
+            if isinstance(item, (tuple, list)):
+                m_obj, fs_code = item[0], item[1]
+            else:
+                m_obj, fs_code = item, "N/A"
+            m_dict = m_obj.model_dump() if hasattr(m_obj, "model_dump") else m_obj
+            future_to_idx[executor.submit(analyze_single_match_deep, m_dict, fs_code)] = idx
+
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            completed_count += 1
+            item = match_pairs[idx]
+            m_item = item[0] if isinstance(item, (tuple, list)) else item
+            
+            h_name = getattr(getattr(m_item, 'home_team', None), 'name', 'Local')
+            a_name = getattr(getattr(m_item, 'away_team', None), 'name', 'Visitante')
+            team_label = f"{h_name} vs {a_name}"
+            
+            if progress_bar:
+                try:
+                    progress_bar.progress(
+                        completed_count / total,
+                        text=f"{status_text_prefix} ({completed_count}/{total}): {team_label}",
+                    )
+                except Exception:
+                    pass
+
+            try:
+                res = future.result()
+                results_map[idx] = res
+            except Exception as e:
+                logger.error(f"Error procesando partido {team_label} en paralelo: {e}")
+
+    return [results_map[i] for i in range(total) if i in results_map]
 
 
 def render_stat_comparison_bar(label: str, val_home: float, val_away: float, unit: str = "") -> None:
@@ -1560,28 +1629,30 @@ def main() -> None:
         # Auto-auditar los primeros 8-10 partidos para dar visualización inmediata
         if len(audited_cache) == 0 and scope_finished_matches:
             auto_sample = scope_finished_matches[: min(10, len(scope_finished_matches))]
-            with st.spinner(f"Procesando auditoría inicial de {len(auto_sample)} partidos finalizados..."):
-                for m_auto, fs_code in auto_sample:
-                    res_auto = analyze_single_match_deep(m_auto.model_dump(), fs_code)
-                    st.session_state["audited_predictions_cache"][m_auto.event_id] = res_auto["prediction"]
-                    st.session_state["audited_matches_cache"][m_auto.event_id] = res_auto["match"]
+            with st.spinner(f"⚡ Procesando auditoría inicial de {len(auto_sample)} partidos en paralelo..."):
+                batch_res = analyze_matches_batch_parallel(auto_sample, max_workers=MAX_PARALLEL_WORKERS)
+                for res_auto in batch_res:
+                    m_val = res_auto["match"]
+                    st.session_state["audited_predictions_cache"][m_val.event_id] = res_auto["prediction"]
+                    st.session_state["audited_matches_cache"][m_val.event_id] = m_val
             audited_cache = st.session_state["audited_predictions_cache"]
             matches_cache = st.session_state["audited_matches_cache"]
 
         if btn_audit_all or btn_audit_slider:
             target_list = scope_finished_matches if btn_audit_all else scope_finished_matches[:audit_slider_val]
-            prog = st.progress(0, text="Iniciando auditoría de partidos finalizados...")
-            tot_run = len(target_list)
-            for idx, (m_item, fs_code) in enumerate(target_list):
-                prog.progress(
-                    (idx + 1) / tot_run,
-                    text=f"Auditando ({idx+1}/{tot_run}): {m_item.home_team.name} vs {m_item.away_team.name}",
-                )
-                res_deep = analyze_single_match_deep(m_item.model_dump(), fs_code)
-                st.session_state["audited_predictions_cache"][m_item.event_id] = res_deep["prediction"]
-                st.session_state["audited_matches_cache"][m_item.event_id] = res_deep["match"]
+            prog = st.progress(0, text="Iniciando auditoría paralela de alta velocidad...")
+            batch_res = analyze_matches_batch_parallel(
+                target_list,
+                progress_bar=prog,
+                status_text_prefix="Auditando en paralelo",
+                max_workers=MAX_PARALLEL_WORKERS,
+            )
+            for res_deep in batch_res:
+                m_val = res_deep["match"]
+                st.session_state["audited_predictions_cache"][m_val.event_id] = res_deep["prediction"]
+                st.session_state["audited_matches_cache"][m_val.event_id] = m_val
             prog.empty()
-            st.success(f"✅ Se auditaron exitosamente {tot_run} partidos finalizados.")
+            st.success(f"✅ Se auditaron exitosamente {len(batch_res)} partidos finalizados a máxima velocidad.")
             st.rerun()
 
         all_audited_preds = list(st.session_state.get("audited_predictions_cache", {}).values())
@@ -1904,19 +1975,20 @@ def main() -> None:
                 st.warning("No se encontraron partidos finalizados en este período para entrenar.")
                 return
 
-            prog_learn = st.progress(0, text="Extrayendo estadísticas y analizando partidos...")
-            tot_to_learn = len(scope_matches_to_learn)
+            prog_learn = st.progress(0, text="Extrayendo estadísticas y analizando partidos en paralelo...")
             audited_pairs_for_learning = []
 
-            for idx, (m_item, fs_code) in enumerate(scope_matches_to_learn):
-                prog_learn.progress(
-                    (idx + 1) / tot_to_learn,
-                    text=f"Analizando ({idx+1}/{tot_to_learn}): {m_item.home_team.name} vs {m_item.away_team.name}",
-                )
-                res_deep = analyze_single_match_deep(m_item.model_dump(), fs_code)
-                st.session_state["audited_predictions_cache"][m_item.event_id] = res_deep["prediction"]
-                st.session_state["audited_matches_cache"][m_item.event_id] = res_deep["match"]
-                audited_pairs_for_learning.append((res_deep["match"], res_deep["prediction"]))
+            batch_res = analyze_matches_batch_parallel(
+                scope_matches_to_learn,
+                progress_bar=prog_learn,
+                status_text_prefix="Analizando para IA",
+                max_workers=MAX_PARALLEL_WORKERS,
+            )
+            for res_deep in batch_res:
+                m_val = res_deep["match"]
+                st.session_state["audited_predictions_cache"][m_val.event_id] = res_deep["prediction"]
+                st.session_state["audited_matches_cache"][m_val.event_id] = m_val
+                audited_pairs_for_learning.append((m_val, res_deep["prediction"]))
 
             prog_learn.progress(1.0, text="Calibrando probabilidades y reentrenando Gradient Boosting...")
             report = learner.learn_from_audited_matches(
@@ -2161,31 +2233,42 @@ def main() -> None:
             if not matches_to_audit:
                 st.warning("No se encontraron partidos finalizados en la selección actual para auditar.")
             else:
-                prog = st.progress(0, text="Auditando aciertos y fallos de partidos finalizados...")
-                for idx, m_item in enumerate(matches_to_audit):
-                    prog.progress(
-                        (idx + 1) / len(matches_to_audit),
-                        text=f"Auditando ({idx+1}/{len(matches_to_audit)}): {m_item.home_team.name} vs {m_item.away_team.name}",
-                    )
-                    fs_code = catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A")
-                    res_deep = analyze_single_match_deep(m_item.model_dump(), fs_code)
-                    st.session_state["audited_predictions_cache"][m_item.event_id] = res_deep["prediction"]
+                prog = st.progress(0, text="Auditando aciertos y fallos en paralelo...")
+                audit_targets = [
+                    (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
+                    for m_item in matches_to_audit
+                ]
+                batch_res = analyze_matches_batch_parallel(
+                    audit_targets,
+                    progress_bar=prog,
+                    status_text_prefix="Auditando",
+                    max_workers=MAX_PARALLEL_WORKERS,
+                )
+                for res_deep in batch_res:
+                    m_val = res_deep["match"]
+                    st.session_state["audited_predictions_cache"][m_val.event_id] = res_deep["prediction"]
+                    if "audited_matches_cache" not in st.session_state:
+                        st.session_state["audited_matches_cache"] = {}
+                    st.session_state["audited_matches_cache"][m_val.event_id] = m_val
                 prog.empty()
-                st.success(f"✅ Se auditaron exitosamente {len(matches_to_audit)} partidos finalizados.")
+                st.success(f"✅ Se auditaron exitosamente {len(batch_res)} partidos finalizados a máxima velocidad.")
 
         if run_scan_btn:
-            scanned_results = []
-            prog = st.progress(0, text="Escaneando partidos...")
-            for idx, m_item in enumerate(filtered_matches[:scan_count]):
-                prog.progress(
-                    (idx + 1) / scan_count,
-                    text=f"Analizando ({idx+1}/{scan_count}): {m_item.home_team.name} vs {m_item.away_team.name}",
-                )
-                fs_code = catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A")
-                res_deep = analyze_single_match_deep(m_item.model_dump(), fs_code)
-                scanned_results.append(res_deep)
-                if m_item.status_type == "finished" and m_item.home_score is not None:
-                    st.session_state["audited_predictions_cache"][m_item.event_id] = res_deep["prediction"]
+            scan_targets = [
+                (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
+                for m_item in filtered_matches[:scan_count]
+            ]
+            prog = st.progress(0, text="Escaneando partidos en paralelo...")
+            scanned_results = analyze_matches_batch_parallel(
+                scan_targets,
+                progress_bar=prog,
+                status_text_prefix="Escaneando Radar",
+                max_workers=MAX_PARALLEL_WORKERS,
+            )
+            for res_deep in scanned_results:
+                m_val = res_deep["match"]
+                if m_val.status_type == "finished" and m_val.home_score is not None:
+                    st.session_state["audited_predictions_cache"][m_val.event_id] = res_deep["prediction"]
             prog.empty()
             st.session_state["radar_results"] = scanned_results
 
@@ -2439,17 +2522,17 @@ def main() -> None:
                 type="primary",
                 use_container_width=True,
             ):
-                analyzed_for_parlay = []
-                p_bar = st.progress(0, text="Extrayendo métricas Opta, H2H y Porteros de los partidos seleccionados...")
-                for i_step, m_idx in enumerate(selected_parlay_indices):
-                    m_cand = filtered_matches[m_idx]
-                    p_bar.progress(
-                        (i_step + 1) / num_sel,
-                        text=f"Analizando ({i_step+1}/{num_sel}): {m_cand.home_team.name} vs {m_cand.away_team.name}...",
-                    )
-                    fs_code = catalog["fs_lookup"].get((m_cand.home_team.id, m_cand.away_team.id), "N/A")
-                    deep_res = analyze_single_match_deep(m_cand.model_dump(), fs_code)
-                    analyzed_for_parlay.append(deep_res)
+                parlay_targets = [
+                    (filtered_matches[m_idx], catalog["fs_lookup"].get((filtered_matches[m_idx].home_team.id, filtered_matches[m_idx].away_team.id), "N/A"))
+                    for m_idx in selected_parlay_indices
+                ]
+                p_bar = st.progress(0, text="Extrayendo métricas Opta, H2H y Porteros en paralelo...")
+                analyzed_for_parlay = analyze_matches_batch_parallel(
+                    parlay_targets,
+                    progress_bar=p_bar,
+                    status_text_prefix="Analizando Parlay",
+                    max_workers=MAX_PARALLEL_WORKERS,
+                )
                 p_bar.empty()
 
                 generated_5 = generate_smart_parlays_5x(
