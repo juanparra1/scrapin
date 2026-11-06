@@ -290,6 +290,9 @@ def upsert_match(match: MatchDetailSchema) -> None:
         session.close()
 
 
+_SAVED_ALIASES_CACHE: set[tuple[str, str]] = set()
+
+
 def save_team_alias(
     source: str,
     external_id: str | None,
@@ -298,7 +301,11 @@ def save_team_alias(
     canonical_name: str,
     similarity_score: float,
 ) -> None:
-    """Registra o actualiza una equivalencia de equipo entre plataformas en la base de datos."""
+    """Registra o actualiza una equivalencia de equipo entre plataformas en la base de datos (con caché en memoria ultra-rápida)."""
+    cache_key = (source.lower().strip(), external_name.lower().strip())
+    if cache_key in _SAVED_ALIASES_CACHE:
+        return
+
     session = SessionLocal()
     try:
         # Asegurar que el equipo canónico exista primero en teams para respetar la ForeignKey en PostgreSQL
@@ -335,6 +342,7 @@ def save_team_alias(
             existing.similarity_score = similarity_score
             existing.external_id = external_id or existing.external_id
         session.commit()
+        _SAVED_ALIASES_CACHE.add(cache_key)
     except Exception as e:
         session.rollback()
         logger.warning(f"No se pudo guardar alias {external_name} -> {canonical_name}: {e}")

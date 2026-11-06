@@ -1185,7 +1185,7 @@ def plot_market_accuracy_chart(breakdown: Dict[str, Any]) -> go.Figure:
     return fig
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1200, show_spinner=False)
 def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]:
     """Carga rápida de todos los partidos de la fecha con prioridad de caché Supabase (0.2s) y fallback automático."""
     # 0. Si no se solicitan todas las ligas del mundo, verificar si ya existen datos precalculados en Supabase
@@ -2724,11 +2724,18 @@ def main() -> None:
             "🎯 Coberturas Dutching",
         ])
 
-        # Carga ultra-rápida de cuotas reales en paralelo para partidos que aún no las tengan cargadas (fechas futuras / mañana)
-        missing_odds_matches = [m for m in filtered_matches if m.odds is None]
+        # Carga ultra-rápida y controlada de cuotas (con memoria de intentos para no repetir peticiones bloqueadas)
+        if "attempted_odds_events" not in st.session_state:
+            st.session_state["attempted_odds_events"] = set()
+
+        missing_odds_matches = [
+            m for m in filtered_matches
+            if m.odds is None and m.event_id not in st.session_state["attempted_odds_events"]
+        ]
         if missing_odds_matches:
             sf_scraper_inst, _ = get_scrapers()
             def _pull_odds(m_item):
+                st.session_state["attempted_odds_events"].add(m_item.event_id)
                 try:
                     m_item.odds = sf_scraper_inst.get_match_odds(
                         m_item.event_id, 
@@ -2736,8 +2743,8 @@ def main() -> None:
                     )
                 except Exception:
                     pass
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as o_exec:
-                list(o_exec.map(_pull_odds, missing_odds_matches[:35]))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as o_exec:
+                list(o_exec.map(_pull_odds, missing_odds_matches[:12]))
 
         # Botón para activar análisis profundo en lote con IA Opta si aún no están en caché
         uncached_matches = [m for m in filtered_matches if m.event_id not in st.session_state.get("audited_predictions_cache", {})]
