@@ -37,6 +37,8 @@ from src.models.schemas import (
     LiveMomentumSummarySchema,
     MatchDetailSchema,
     PlayerPropSchema,
+    TeamSchema,
+    TournamentSchema,
 )
 from src.scrapers.flashscore import FlashscoreScraper
 from src.scrapers.sofascore import SofascoreScraper
