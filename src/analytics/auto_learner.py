@@ -3,7 +3,7 @@
 Aprende de aciertos y errores en partidos finalizados:
 1. Ajuste Bayesiano de Pesos del Ensamble (Dixon-Coles vs ML Gradient Boosting según Brier Score).
 2. Calibración y Atenuación de Probabilidades por Línea (Shrinkage empírico para evitar sobreconfianza).
-3. Algoritmo de Bandido Multibrazo (Thompson Sampling) para priorizar patas en parlays cuota 5x.
+3. Algoritmo de Bandido Multibrazo (Thompson Sampling) para priorizar selecciones de alta confianza.
 4. Reentrenamiento autónomo del clasificador Gradient Boosting con partidos guardados en SQLite.
 """
 
@@ -55,7 +55,7 @@ DEFAULT_CANONICAL_LINES = [
 
 
 class AutoLearner:
-    """Gestiona el aprendizaje continuo, calibración dinámica y bandidos para parlays."""
+    """Gestiona el aprendizaje continuo, calibración dinámica y bandidos de confianza."""
 
     def __init__(self, state_path: Path = LEARNED_STATE_PATH) -> None:
         self.state_path = state_path
@@ -152,7 +152,7 @@ class AutoLearner:
 
     def get_bandit_line_score(self, line_name: str) -> float:
         """
-        Retorna la prioridad de selección para un parlay según Thompson Sampling / Recompensa.
+        Retorna la prioridad de selección de la línea según Thompson Sampling / Recompensa.
         Valor entre 0.0 y 1.0.
         """
         bp = self.state.get("bandit_priors", {}).get(line_name)
@@ -172,7 +172,7 @@ class AutoLearner:
         Ejecuta el ciclo de aprendizaje completo sobre un conjunto de partidos auditados:
         1. Evalúa Brier Scores y ajusta pesos del ensamble (Dixon-Coles vs ML).
         2. Actualiza la calibración y multiplicadores de las 28 líneas.
-        3. Actualiza los priors de Thompson Sampling para el generador de parlays.
+        3. Actualiza los priors de Thompson Sampling para el ranking de líneas.
         4. Reentrena el clasificador Gradient Boosting con los nuevos datos de SQLite.
         """
         if not audited_pairs:
@@ -285,7 +285,7 @@ class AutoLearner:
 
             # Clasificar estatus de la línea
             if obs_rate >= 0.75 and tot_t >= 4:
-                status_label = "🌟 Línea Estrella (Prioridad Alta en Parlays)"
+                status_label = "🌟 Línea Estrella (Máxima Confianza Estadística)"
             elif obs_rate >= 0.55:
                 status_label = "🟢 Línea Estable / Confiable"
             elif obs_rate >= 0.42:

@@ -25,7 +25,6 @@ from src.analytics.predictor import (
     _poisson_prob_over,
     calculate_kelly_stake,
     compute_team_form,
-    generate_smart_parlays_5x,
     predict_match_poisson,
 )
 from src.models.database import (
@@ -1662,7 +1661,7 @@ def main() -> None:
                 "🎯 Análisis del Partido",
                 "📊 Auditoría de Pronósticos (Aciertos/Fallos)",
                 "🧠 Auto-Aprendizaje e IA Adaptativa",
-                "🎰 Generador 5 Parlays (Cuota 5x) & Kelly",
+                "🎟️ Calculadora Kelly & Gestión de Banca",
                 "🔴 En Vivo & Momentum",
                 "🔥 Radar Top Picks",
                 "📋 Catálogo Completo",
@@ -1899,7 +1898,7 @@ def main() -> None:
             bottom_spec = list(reversed(active_evaluated[-5:])) if len(active_evaluated) >= 5 else []
 
             with ld_col1:
-                st.markdown("#### 🟢 Líneas Específicas que MÁS ACIERTA (Para Parlays)")
+                st.markdown("#### 🟢 Líneas Específicas con Mayor Tasa de Acierto (Alta Confianza)")
                 st.caption("Líneas con porcentaje de éxito sobresaliente. Úsalas como base para asegurar tus apuestas:")
                 for sl in top_spec:
                     st.markdown(
@@ -2018,7 +2017,7 @@ def main() -> None:
         st.caption(
             "Este motor permite que el sistema **aprenda autónomamente de sus errores y aciertos en partidos finalizados**: "
             "ajusta los pesos del ensamble (Dixon-Coles vs Machine Learning), calibra las 28 líneas de apuesta para eliminar la sobreconfianza, "
-            "optimiza las prioridades del Bandido Thompson Sampling para parlays cuota 5x y reentrena el modelo Gradient Boosting con nuevos registros en SQLite."
+            "optimiza las prioridades del Bandido Thompson Sampling para selecciones de alta confianza y reentrena el modelo Gradient Boosting con nuevos registros en la base de datos."
         )
 
         learner = get_auto_learner()
@@ -2192,17 +2191,17 @@ def main() -> None:
         # 3. PESTAÑAS DETALLADAS DEL CEREBRO DE LA IA
         tab_bandit, tab_calib, tab_history = st.tabs(
             [
-                "🎰 Bandido Thompson Sampling (Prioridades para Parlays Cuota 5x)",
+                "🎲 Bandido Thompson Sampling (Ranking de Confianza y Calibración Adaptativa)",
                 "🎯 Calibración y Atenuación de las 28 Líneas",
                 "📜 Historial de Sesiones y Evolución",
             ]
         )
 
         with tab_bandit:
-            st.markdown("#### 🎰 Algoritmo de Bandido Multibrazo (Thompson Sampling)")
+            st.markdown("#### 🎲 Algoritmo de Bandido Multibrazo (Thompson Sampling)")
             st.caption(
-                "El generador de parlays consulta este ranking en tiempo real: las líneas que acumulan aciertos reciben recompensa positiva (+1) "
-                "y ganan mayor prioridad para entrar en las combinadas cuota 5x; las líneas con rachas de fallo son castigadas para proteger tu banca."
+                "El modelo consulta este ranking en tiempo real: las líneas que acumulan aciertos reciben recompensa positiva (+1) "
+                "y ganan mayor prioridad estadística; las líneas con rachas de fallo son atenuadas para proteger tu banca."
             )
 
             bandit_rows = []
@@ -2215,7 +2214,7 @@ def main() -> None:
                     "Puntuación de Recompensa (0-1)": score,
                     "Éxitos (Alpha)": alpha,
                     "Fallos (Beta)": beta_val,
-                    "Prioridad Parlay": bdata.get("status", "Estándar"),
+                    "Nivel de Confianza": bdata.get("status", "Estándar"),
                 })
 
             bandit_df = pd.DataFrame(bandit_rows).sort_values("Puntuación de Recompensa (0-1)", ascending=False)
@@ -2620,166 +2619,13 @@ def main() -> None:
                 st.dataframe(pd.DataFrame(value_and_smart), use_container_width=True, hide_index=True)
         return
 
-    # MODO 3: GENERADOR AUTOMÁTICO DE 5 PARLAYS (CUOTA 5.0x - 5.8x BETANO SIN 1X2 • OPCIONES >= 70% PROB) Y CALCULADORA DE KELLY
-    if view_mode == "🎰 Generador 5 Parlays (Cuota 5x) & Kelly":
-        st.subheader("🎰 Generador Inteligente de 5 Parlays Estadísticos (Cuota 5.0x – 5.8x Betano • Opciones ≥ 70% Probabilidad • Sin 1X2)")
-        st.caption(
-            "Selecciona **todos los partidos que quieras** (3, 5, 8, 12 o más). El algoritmo no necesita meter todos los partidos en cada parley: "
-            "evalúa las mejores combinaciones estadísticas con **cuotas oficiales de Betano / Mercado**, "
-            "garantizando que cada parley alcance **cuota ~5x (5.00 a 5.85)** con **opciones ≥ 70% de probabilidad** "
-            "y **0% de riesgo por resultado (sin 1X2 ni quién gana)**."
-        )
-
-        default_indices = list(range(min(6, len(filtered_matches))))
-        parlay_col1, parlay_col2, parlay_col3, parlay_col4 = st.columns([2.1, 1.0, 0.9, 0.8])
-
-        with parlay_col1:
-            selected_parlay_indices = st.multiselect(
-                "⚽ 1. Selecciona los partidos a analizar (3 o más, sin límite):",
-                options=list(range(len(filtered_matches))),
-                default=default_indices,
-                format_func=lambda idx: match_options[idx],
-                help="Puedes seleccionar tantos partidos como gustes. El motor armará los 5 parleys combinando los partidos ideales para dar cuota 5.",
-            )
-        with parlay_col2:
-            odd_range = st.slider(
-                "🎯 2. Rango de Cuota Betano Objetivo:",
-                min_value=4.50,
-                max_value=8.00,
-                value=(5.00, 5.85),
-                step=0.05,
-                help="Por defecto busca combinaciones entre 5.00 y 5.85 ('cuota 5 y algo' en Betano).",
-            )
-        with parlay_col3:
-            min_prob_filter = st.slider(
-                "🛡️ 3. Prob. Mínima por Pata (%):",
-                min_value=68.0,
-                max_value=80.0,
-                value=70.0,
-                step=1.0,
-                help="Solo se incluirán pronósticos estadísticos individuales cuya probabilidad del modelo sea igual o mayor a este umbral (por defecto ≥ 70%).",
-            )
-        with parlay_col4:
-            stake_per_parlay = st.number_input(
-                "💵 Apuesta ($):",
-                min_value=1.0,
-                value=10.0,
-                step=5.0,
-            )
-
-        num_sel = len(selected_parlay_indices)
-        if num_sel < 3:
-            st.warning("⚠️ Por favor selecciona **al menos 3 partidos** en el selector de arriba para poder armar las combinaciones de los 5 Parlays.")
-        else:
-            if st.button(
-                f"🚀 Analizar los {num_sel} Partidos y Generar 5 Parlays Betano (Cuota {odd_range[0]:.2f}x – {odd_range[1]:.2f}x • Patas ≥ {min_prob_filter:.0f}% • Sin 1X2)",
-                type="primary",
-                use_container_width=True,
-            ):
-                parlay_targets = [
-                    (filtered_matches[m_idx], catalog["fs_lookup"].get((filtered_matches[m_idx].home_team.id, filtered_matches[m_idx].away_team.id), "N/A"))
-                    for m_idx in selected_parlay_indices
-                ]
-                p_bar = st.progress(0, text="Extrayendo métricas Opta, H2H y Porteros en paralelo...")
-                analyzed_for_parlay = analyze_matches_batch_parallel(
-                    parlay_targets,
-                    progress_bar=p_bar,
-                    status_text_prefix="Analizando Parlay",
-                    max_workers=MAX_PARALLEL_WORKERS,
-                )
-                p_bar.empty()
-
-                generated_5 = generate_smart_parlays_5x(
-                    analyzed_for_parlay,
-                    min_total_odd=float(odd_range[0]),
-                    max_total_odd=float(odd_range[1]),
-                    num_parlays=5,
-                    min_leg_prob=float(min_prob_filter),
-                )
-                st.session_state["generated_parlays_5x"] = generated_5
-
-        parlays_list = st.session_state.get("generated_parlays_5x", [])
-        if parlays_list:
-            total_legs_used = sum(len(p["legs"]) for p in parlays_list)
-            unique_picks_used = len({(l["event_id"], l["pick"]) for p in parlays_list for l in p["legs"]})
-            st.markdown(
-                f"### 🏆 Tus 5 Parlays Inteligentes Generados (Opciones ≥ {min_prob_filter:.0f}% Prob. • 0 Repeticiones: {unique_picks_used}/{total_legs_used} selecciones únicas • Sin 1X2)"
-            )
-            for p_item in parlays_list:
-                tot_odd = p_item["total_odd"]
-                pot_return = round(stake_per_parlay * tot_odd, 2)
-                pot_profit = round(pot_return - stake_per_parlay, 2)
-                min_leg_p = p_item.get("min_leg_prob_pct", min(l["prob"] for l in p_item["legs"]))
-
-                if p_item["parlay_won"] is True:
-                    status_banner = "<span class='hit-yes'>🏆 PARLAY GANADOR (100% Aciertos)</span>"
-                elif p_item["parlay_won"] is False:
-                    status_banner = f"<span class='hit-no'>❌ Aciertos: {p_item['hits_count']}/{len(p_item['legs'])}</span>"
-                elif p_item["settled_count"] > 0:
-                    status_banner = f"<span class='conf-med'>⏳ En progreso ({p_item['hits_count']}/{p_item['settled_count']} acertados)</span>"
-                else:
-                    status_banner = "<span class='conf-high'>LISTO PARA JUGAR (100% PATAS ≥ 70%)</span>"
-
-                header_html = (
-                    f"<div class='market-card notranslate' translate='no' style='border-left: 5px solid #38bdf8; margin-top: 10px;'>"
-                    f"<div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;'>"
-                    f"<span style='font-size:1.15rem; font-weight:900; color:#f8fafc;'>🎰 {p_item['title']}</span>"
-                    f"{status_banner}"
-                    f"</div>"
-                    f"<div style='font-size:0.83rem; color:#94a3b8; margin: 4px 0 10px 0;'>{p_item['strategy']}</div>"
-                    f"<div style='display:flex; gap:24px; flex-wrap:wrap; font-size:0.92rem;'>"
-                    f"<div>🔥 <b>Cuota Total del Parlay:</b> <span style='color:#4ade80; font-size:1.15rem; font-weight:900;'>{tot_odd:.2f}x</span></div>"
-                    f"<div>💰 <b>Pago con ${stake_per_parlay:.0f}:</b> <span style='color:#38bdf8; font-weight:800;'>${pot_return:.2f}</span> (Ganancia neta: +${pot_profit:.2f})</div>"
-                    f"<div>🛡️ <b>Prob. Mín / Media por Pata:</b> <span style='color:#4ade80; font-weight:800;'>{min_leg_p:.1f}% mín</span> / <b>{p_item['avg_leg_prob_pct']:.1f}% media</b> (Conjunta: {p_item['combined_prob_pct']:.1f}%)</div>"
-                    f"</div>"
-                    f"</div>"
-                )
-                st.markdown(header_html, unsafe_allow_html=True)
-
-                leg_rows = []
-                for idx_l, leg in enumerate(p_item["legs"], start=1):
-                    if leg["hit"] is True:
-                        ver_str = f"✅ ACIERTO ({leg['actual']})" if leg.get("actual") else "✅ ACIERTO"
-                    elif leg["hit"] is False:
-                        ver_str = f"❌ FALLO ({leg['actual']})" if leg.get("actual") else "❌ FALLO"
-                    else:
-                        ver_str = "⏳ Por jugar"
-
-                    leg_rows.append(
-                        {
-                            "#": str(idx_l),
-                            "Partido": leg["match_label"],
-                            "Mercado Estadístico (Sin 1X2)": leg["category"],
-                            "Pronóstico Seleccionado": leg["pick"],
-                            "Prob. Modelo (%)": leg["prob"],
-                            "Cuota Betano": leg["odd"],
-                            "Fuente de Cuota": leg.get("odd_source", "Betano"),
-                            "Sustento Opta / Proyección": leg["detail"],
-                            "Estado Real": ver_str,
-                        }
-                    )
-
-                st.dataframe(pd.DataFrame(leg_rows), use_container_width=True, hide_index=True)
-
-                if st.button(
-                    f"📥 Cargar Parlay #{p_item['parlay_number']} ({tot_odd:.2f}x) en mi Boleto / Calculadora Kelly",
-                    key=f"load_parlay_{p_item['parlay_number']}",
-                ):
-                    st.session_state["bet_slip"] = [
-                        {
-                            "Partido": leg["match_label"],
-                            "Mercado": leg["category"],
-                            "Selección": leg["pick"],
-                            "Probabilidad (%)": leg["prob"],
-                            "Cuota Justa": leg["odd"],
-                        }
-                        for leg in p_item["legs"]
-                    ]
-                    st.toast(f"Parlay #{p_item['parlay_number']} cargado en tu Boleto y Calculadora Kelly.")
-                    st.rerun()
-
-        st.divider()
+    # MODO 3: GESTIÓN DE BANCA Y CALCULADORA DE KELLY
+    if view_mode == "🎟️ Calculadora Kelly & Gestión de Banca":
         st.subheader("🎟️ Tu Boleto Personalizado & Gestión de Banca (Criterio de Kelly)")
+        st.caption(
+            "Gestiona el riesgo matemático y calcula el tamaño óptimo de apuesta (Stake) "
+            "según el Criterio Fraccional de Kelly (1/4) para maximizar el crecimiento de tu banca sin arriesgarla."
+        )
         slip = st.session_state["bet_slip"]
 
         b_col1, b_col2 = st.columns([1.4, 1.0])
@@ -2787,10 +2633,13 @@ def main() -> None:
             st.markdown("#### 📋 Selecciones en tu Boleto Actual")
             if not slip:
                 st.info(
-                    "Puedes cargar cualquiera de los **5 Parlays generados arriba** con un clic, o añadir selecciones individuales desde la vista **'🎯 Análisis del Partido'**."
+                    "Añade selecciones individuales desde la vista **'🎯 Análisis del Partido'** para calcular su valor esperado (EV+) y el stake óptimo."
                 )
             else:
                 st.dataframe(pd.DataFrame(slip), use_container_width=True, hide_index=True)
+                if st.button("🗑️ Limpiar Todas las Selecciones", use_container_width=True):
+                    st.session_state["bet_slip"] = []
+                    st.rerun()
 
         with b_col2:
             st.markdown("#### 🧮 Calculadora de Stake Óptimo (Kelly Fraccional 1/4)")
@@ -2806,9 +2655,9 @@ def main() -> None:
                 default_fair_odd = round(100.0 / max(0.5, default_prob), 2)
                 suggested_bookie_odd = round(combined_odd, 2)
             else:
-                default_prob = 22.0
-                default_fair_odd = 4.55
-                suggested_bookie_odd = 5.25
+                default_prob = 55.0
+                default_fair_odd = 1.82
+                suggested_bookie_odd = 1.95
 
             calc_prob = st.number_input(
                 "📊 Probabilidad Real Estimada por el Modelo (%):",
@@ -2818,7 +2667,7 @@ def main() -> None:
                 step=0.5,
             )
             bookie_odd = st.number_input(
-                f"🏦 Cuota Total en tu Casa de Apuestas (Cuota mínima justa: {default_fair_odd}):",
+                f"🏦 Cuota en tu Casa de Apuestas (Cuota mínima justa: {default_fair_odd}):",
                 min_value=1.05,
                 max_value=100.0,
                 value=max(1.05, float(suggested_bookie_odd)),
@@ -2835,7 +2684,7 @@ def main() -> None:
                 )
             else:
                 st.error(
-                    "⚠️ **CUOTA SIN VALOR MATEMÁTICO (EV-)** — La cuota de la casa es inferior a la probabilidad real. Ajusta selecciones o busca mejor cuota."
+                    "⚠️ **CUOTA SIN VALOR MATEMÁTICO (EV-)** — La cuota de la casa es inferior a la probabilidad real. Busca mejor cuota o descarta la apuesta."
                 )
         return
 
