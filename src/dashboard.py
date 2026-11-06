@@ -7,7 +7,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import concurrent.futures
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -1269,9 +1269,18 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                 if not include_all_leagues and not any(c in country_clean for c in curated_countries):
                     continue
 
+                # Filtrar que el partido de Flashscore realmente corresponda a la fecha solicitada
+                tz_local = timezone(timedelta(hours=-5))
+                fsm_date_local = datetime.fromtimestamp(fsm.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
+                if fsm_date_local != date_str:
+                    continue
+
                 numeric_id = abs(hash(fsm.flashscore_id)) % (10**9)
                 status_map = {"1": "notstarted", "2": "inprogress", "3": "finished"}
-                status_type = status_map.get(fsm.status_code, "notstarted")
+                if fsm.status_code in status_map.values():
+                    status_type = fsm.status_code
+                else:
+                    status_type = status_map.get(str(fsm.status_code), "notstarted")
                 t_name = parts[1].strip() if len(parts) > 1 else fsm.tournament_title
                 home_id = abs(hash(fsm.home_team_name)) % (10**7)
                 away_id = abs(hash(fsm.away_team_name)) % (10**7)

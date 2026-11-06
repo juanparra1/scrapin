@@ -2,7 +2,7 @@
 
 import concurrent.futures
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from src.config import SOFASCORE_API_BASE, TOP_TOURNAMENTS
 from src.models.schemas import (
@@ -93,6 +93,8 @@ class SofascoreScraper(BaseScraperClient):
             t_url = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{date_str}"
             return self.get_json(t_url, ttl_hours=0.5)
 
+        tz_local = timezone(timedelta(hours=-5))
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exec_t:
             results = exec_t.map(_fetch_tourney, active_top_tournaments)
             for t_data in results:
@@ -101,8 +103,8 @@ class SofascoreScraper(BaseScraperClient):
                 for raw in t_data["events"]:
                     match_schema = self._parse_event_summary(raw)
                     if match_schema and match_schema.event_id not in seen_event_ids:
-                        event_date = match_schema.start_time_utc.strftime("%Y-%m-%d")
-                        if event_date == date_str or len(t_data["events"]) <= 18:
+                        event_date_local = datetime.fromtimestamp(match_schema.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
+                        if event_date_local == date_str:
                             seen_event_ids.add(match_schema.event_id)
                             matches.append(match_schema)
 
@@ -115,8 +117,10 @@ class SofascoreScraper(BaseScraperClient):
                 for raw in c_data["events"]:
                     match_schema = self._parse_event_summary(raw)
                     if match_schema and match_schema.event_id not in seen_event_ids:
-                        seen_event_ids.add(match_schema.event_id)
-                        matches.append(match_schema)
+                        event_date_local = datetime.fromtimestamp(match_schema.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
+                        if event_date_local == date_str:
+                            seen_event_ids.add(match_schema.event_id)
+                            matches.append(match_schema)
 
         matches.sort(key=lambda m: m.start_timestamp)
         return matches
