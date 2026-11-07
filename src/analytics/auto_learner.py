@@ -101,6 +101,23 @@ class AutoLearner:
         }
 
     def _load_or_init_state(self) -> Dict[str, Any]:
+        # 1. Intentar cargar desde Base de Datos persistente (Supabase / Postgres)
+        try:
+            from src.models.database import load_model_calibration
+            db_state = load_model_calibration("primary")
+            if db_state and "ensemble_weights" in db_state and "lines_calibration" in db_state:
+                # Sincronizar archivo local si es necesario
+                try:
+                    self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.state_path, "w", encoding="utf-8") as f:
+                        json.dump(db_state, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+                return db_state
+        except Exception:
+            pass
+
+        # 2. Si no hay en DB o falla, revisar caché JSON local
         if self.state_path.exists():
             try:
                 with open(self.state_path, "r", encoding="utf-8") as f:
@@ -110,6 +127,8 @@ class AutoLearner:
                         return data
             except Exception:
                 pass
+
+        # 3. Estado por defecto
         st = self._default_state()
         self._save_state(st)
         return st
@@ -118,9 +137,21 @@ class AutoLearner:
         if state is not None:
             self.state = state
         self.state["last_updated"] = datetime.utcnow().isoformat()
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2, ensure_ascii=False)
+        
+        # 1. Guardar localmente
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        # 2. Persistir en Supabase / Base de datos para sobrevivir reinicios de Render
+        try:
+            from src.models.database import save_model_calibration
+            save_model_calibration(self.state, key="primary")
+        except Exception:
+            pass
 
     def reset_learning(self) -> None:
         """Restablece el cerebro a su configuración de fábrica."""

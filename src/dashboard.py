@@ -246,6 +246,58 @@ st.markdown(
         padding: 10px 14px;
         margin-bottom: 8px;
     }
+    .smart-money-badge {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.22) 0%, rgba(245, 158, 11, 0.25) 100%);
+        border: 1px solid #f59e0b;
+        border-radius: 10px;
+        padding: 8px 14px;
+        color: #fef08a;
+        font-size: 0.86rem;
+        font-weight: 700;
+        margin: 8px 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        box-shadow: 0 4px 12px rgba(245, 158, 11, 0.15);
+    }
+    .telegram-btn {
+        display: inline-flex;
+        align-items: center;
+        background: #0088cc;
+        color: white !important;
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-weight: 700;
+        text-decoration: none;
+        font-size: 0.85rem;
+        margin: 4px 0;
+    }
+    /* OPTIMIZACIONES RESPONSIVE PARA MÓVILES (SMARTPHONES) */
+    @media (max-width: 768px) {
+        .scoreboard-card {
+            padding: 14px 14px !important;
+            border-radius: 12px !important;
+        }
+        .team-title {
+            font-size: 1.15rem !important;
+        }
+        .market-card {
+            padding: 12px 12px !important;
+            margin-bottom: 10px !important;
+        }
+        .market-pick {
+            font-size: 0.98rem !important;
+        }
+        .league-pill {
+            font-size: 0.72rem !important;
+            padding: 2px 10px !important;
+        }
+        div[data-testid="column"] {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+            margin-bottom: 6px !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1913,22 +1965,45 @@ def main() -> None:
 
                 st.dataframe(pd.DataFrame(leg_rows), use_container_width=True, hide_index=True)
 
-                if st.button(
-                    f"📥 Cargar Parlay #{p_item['parlay_number']} ({tot_odd:.2f}x) en mi Boleto / Calculadora Kelly",
-                    key=f"load_parlay_{p_item['parlay_number']}",
-                ):
-                    st.session_state["bet_slip"] = [
-                        {
-                            "Partido": leg["match_label"],
-                            "Mercado": leg["category"],
-                            "Selección": leg["pick"],
-                            "Probabilidad (%)": leg["prob"],
-                            "Cuota Justa": leg["odd"],
-                        }
-                        for leg in p_item["legs"]
-                    ]
-                    st.toast(f"Parlay #{p_item['parlay_number']} cargado en tu Boleto y Calculadora Kelly.")
-                    st.rerun()
+                col_p_act1, col_p_act2 = st.columns([1.4, 1.0])
+                with col_p_act1:
+                    if st.button(
+                        f"📥 Cargar Parlay #{p_item['parlay_number']} ({tot_odd:.2f}x) en mi Boleto",
+                        key=f"load_parlay_{p_item['parlay_number']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["bet_slip"] = [
+                            {
+                                "Partido": leg["match_label"],
+                                "Mercado": leg["category"],
+                                "Selección": leg["pick"],
+                                "Probabilidad (%)": leg["prob"],
+                                "Cuota Justa": leg["odd"],
+                            }
+                            for leg in p_item["legs"]
+                        ]
+                        st.toast(f"Parlay #{p_item['parlay_number']} cargado en tu Boleto y Calculadora Kelly.")
+                        st.rerun()
+
+                with col_p_act2:
+                    from src.services.telegram_bot import is_telegram_configured, notify_parlay_ready
+                    if is_telegram_configured():
+                        if st.button(
+                            f"📲 Enviar Parlay #{p_item['parlay_number']} a Telegram",
+                            key=f"tg_parlay_{p_item['parlay_number']}",
+                            use_container_width=True,
+                        ):
+                            legs_strs = [f"{l['match_label']} ➜ {l['pick']} (Cuota {l['odd']:.2f})" for l in p_item["legs"]]
+                            sent = notify_parlay_ready(
+                                parlay_title=p_item["title"],
+                                total_odds=tot_odd,
+                                win_prob_pct=p_item["combined_prob_pct"],
+                                legs=legs_strs,
+                            )
+                            if sent:
+                                st.toast(f"¡Parlay #{p_item['parlay_number']} enviado a Telegram con éxito! 🚀")
+                            else:
+                                st.error("No se pudo enviar el parlay a Telegram.")
 
         st.divider()
         st.subheader("📋 Tu Boleto Personalizado & Gestión de Banca (Criterio de Kelly)")
@@ -3103,6 +3178,16 @@ def main() -> None:
             live_minute = 45
             live_momentum = 0.0
 
+            # Garantizar que las cuotas reales estén cargadas para alimentar la cartera
+            if m_cand.odds is None:
+                if m_cand.event_id in deep_cache and deep_cache[m_cand.event_id].get("match"):
+                    m_cand.odds = getattr(deep_cache[m_cand.event_id]["match"], "odds", None)
+                if m_cand.odds is None and len(value_candidates) < 15:
+                    try:
+                        m_cand.odds = sf_scraper.get_match_odds(m_cand.event_id, is_live=is_live_match)
+                    except Exception:
+                        pass
+
             if is_live_match:
                 # Extraer minuto de juego
                 import re
@@ -3515,32 +3600,53 @@ def main() -> None:
                             st.metric("Retorno Potencial", f"${b.potential_payout:.2f}", f"EV: +{b.ev_net * 100.0:.1f}%")
 
                 st.markdown("---")
-                # Botón de confirmación con idempotencia
-                if st.button("✅ Confirmar y Guardar Cartera de Valor en la Base de Datos", type="primary", use_container_width=True):
-                    bets_payload = [
-                        {
-                            "event_id": b.event_id,
-                            "event_name": b.event_name,
-                            "tournament": b.tournament,
-                            "match_date": b.match_date,
-                            "strategy": b.strategy,
-                            "market_code": b.market_code,
-                            "pick_name": b.pick_name,
-                            "odds_taken": b.odds_taken,
-                            "fair_odds": b.fair_odds,
-                            "model_probability": b.model_probability,
-                            "stake_amount": b.stake_amount,
-                            "stake_percentage": b.stake_percentage,
-                            "potential_payout": b.potential_payout,
-                        }
-                        for b in allocated_value_bets
-                    ]
-                    saved, skipped = save_portfolio_bets(bets_payload)
-                    if saved > 0:
-                        st.success(f"🎉 **{saved} apuestas guardadas exitosamente** en el portafolio y registradas contablemente en el libro diario.")
-                    if skipped > 0:
-                        st.info(f"ℹ️ {skipped} apuestas ya existían previamente y se omitieron por protección idempotente (anti-duplicados).")
-                    st.rerun()
+                cart_col1, cart_col2 = st.columns([1.5, 1.0])
+                with cart_col1:
+                    # Botón de confirmación con idempotencia
+                    if st.button("✅ Confirmar y Guardar Cartera de Valor en la Base de Datos", type="primary", use_container_width=True):
+                        bets_payload = [
+                            {
+                                "event_id": b.event_id,
+                                "event_name": b.event_name,
+                                "tournament": b.tournament,
+                                "match_date": b.match_date,
+                                "strategy": b.strategy,
+                                "market_code": b.market_code,
+                                "pick_name": b.pick_name,
+                                "odds_taken": b.odds_taken,
+                                "fair_odds": b.fair_odds,
+                                "model_probability": b.model_probability,
+                                "stake_amount": b.stake_amount,
+                                "stake_percentage": b.stake_percentage,
+                                "potential_payout": b.potential_payout,
+                            }
+                            for b in allocated_value_bets
+                        ]
+                        saved, skipped = save_portfolio_bets(bets_payload)
+                        if saved > 0:
+                            st.success(f"🎉 **{saved} apuestas guardadas exitosamente** en el portafolio y registradas contablemente en el libro diario.")
+                        if skipped > 0:
+                            st.info(f"ℹ️ {skipped} apuestas ya existían previamente y se omitieron por protección idempotente (anti-duplicados).")
+                        st.rerun()
+
+                with cart_col2:
+                    from src.services.telegram_bot import is_telegram_configured, notify_parlay_ready
+                    if is_telegram_configured():
+                        if st.button("📲 Compartir Cartera a Telegram", use_container_width=True, key="btn_share_portfolio_tg"):
+                            legs_txt = [
+                                f"{b.event_name} ➜ {b.pick_name} (Cuota {b.odds_taken:.2f} • Stake ${b.stake_amount:.2f})"
+                                for b in allocated_value_bets
+                            ]
+                            sent = notify_parlay_ready(
+                                parlay_title=f"Cartera de Valor (+EV con Kelly) • {len(allocated_value_bets)} Apuestas",
+                                total_odds=round(sum(b.odds_taken for b in allocated_value_bets) / max(1, len(allocated_value_bets)), 2),
+                                win_prob_pct=round(sum(b.model_probability for b in allocated_value_bets) / max(1, len(allocated_value_bets)) * 100, 1),
+                                legs=legs_txt,
+                            )
+                            if sent:
+                                st.toast("¡Cartera de Valor enviada a Telegram con éxito! 🚀")
+                            else:
+                                st.error("No se pudo enviar la cartera a Telegram.")
 
         # TAB 3: COBERTURAS DUTCHING
         with tab_dutch:
@@ -3799,7 +3905,13 @@ def main() -> None:
 
     # BANNER DE CAÍDA DE CUOTAS (DROPPING ODDS / SMART MONEY)
     if m.odds and m.odds.smart_money_side:
-        st.warning(f"📉 **ALERTA DE MOVIMIENTO DE CUOTAS (Smart Money):** {m.odds.smart_money_side}")
+        st.markdown(
+            f"<div class='smart-money-badge'>"
+            f"<span>🔥</span> <div><b>ALERTA DE FLUJO INSTITUCIONAL (SMART MONEY):</b> {m.odds.smart_money_side} "
+            f"<span style='color:#38bdf8; font-size:0.78rem;'>• Las casas de apuestas ajustaron la cuota a la baja por volumen inusual de dinero profesional.</span></div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     # BANNER DE PENALIZACIÓN POR BAJAS CLAVE
     if p.injury_penalty_home_pct > 0 or p.injury_penalty_away_pct > 0:

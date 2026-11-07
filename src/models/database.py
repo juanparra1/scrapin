@@ -153,6 +153,14 @@ class BankrollLedgerORM(Base):
     bet_id = Column(Integer, nullable=True)
 
 
+class ModelCalibrationRecord(Base):
+    __tablename__ = "model_calibration"
+
+    key = Column(String(50), primary_key=True)
+    state_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 if DATABASE_URL:
     # Conexión optimizada a PostgreSQL en la nube (Supabase) con connection pooling
     engine = create_engine(
@@ -686,6 +694,41 @@ def purge_old_records(days_to_keep: int = 3) -> Dict[str, int]:
         session.rollback()
         logger.warning(f"Error ejecutando purge_old_records: {e}")
         return purged_counts
+    finally:
+        session.close()
+
+
+def save_model_calibration(state_dict: dict, key: str = "primary") -> bool:
+    """Almacena el estado de calibración bayesiana del modelo en Supabase de forma persistente."""
+    session = SessionLocal()
+    try:
+        rec = session.get(ModelCalibrationRecord, key)
+        if not rec:
+            rec = ModelCalibrationRecord(key=key)
+            session.add(rec)
+        rec.state_json = json.dumps(state_dict, default=str, ensure_ascii=False)
+        rec.updated_at = datetime.utcnow()
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.warning(f"Error guardando calibración de modelo en Supabase: {e}")
+        return False
+    finally:
+        session.close()
+
+
+def load_model_calibration(key: str = "primary") -> Optional[dict]:
+    """Carga el estado de calibración bayesiana del modelo desde Supabase."""
+    session = SessionLocal()
+    try:
+        rec = session.get(ModelCalibrationRecord, key)
+        if rec and rec.state_json:
+            return json.loads(rec.state_json)
+        return None
+    except Exception as e:
+        logger.warning(f"Error cargando calibración de modelo desde Supabase: {e}")
+        return None
     finally:
         session.close()
 

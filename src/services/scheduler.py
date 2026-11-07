@@ -220,6 +220,48 @@ class HeartbeatScheduler:
 
             prediction = predict_match_poisson(m_item, hf, af)
 
+            # Evaluar y disparar alertas de Telegram si hay +EV relevante
+            if m_item.odds:
+                try:
+                    from src.services.telegram_bot import check_and_alert_value_bets
+                    tg_candidates = []
+                    # 1X2 EV
+                    for outcome, prob, odd_val in [
+                        ("Victoria Local (1)", prediction.prob_home_win, m_item.odds.home_win),
+                        ("Empate (X)", prediction.prob_draw, m_item.odds.draw),
+                        ("Victoria Visitante (2)", prediction.prob_away_win, m_item.odds.away_win),
+                    ]:
+                        if odd_val and odd_val > 1.0:
+                            ev = (prob * odd_val - 1.0) * 100
+                            if ev >= 8.0:
+                                tg_candidates.append({
+                                    "event_id": m_item.event_id,
+                                    "match_name": f"{m_item.home_team.name} vs {m_item.away_team.name}",
+                                    "tournament": m_item.tournament.name if m_item.tournament else "Fútbol",
+                                    "market_name": outcome,
+                                    "odds": odd_val,
+                                    "ev": ev,
+                                    "model_prob": prob,
+                                    "smart_money": bool(m_item.odds.smart_money_side),
+                                })
+                    # Over 2.5
+                    if m_item.odds.over_25 and m_item.odds.over_25 > 1.0:
+                        ev_o25 = (prediction.prob_over_25 * m_item.odds.over_25 - 1.0) * 100
+                        if ev_o25 >= 8.0:
+                            tg_candidates.append({
+                                "event_id": m_item.event_id,
+                                "match_name": f"{m_item.home_team.name} vs {m_item.away_team.name}",
+                                "tournament": m_item.tournament.name if m_item.tournament else "Fútbol",
+                                "market_name": "Over 2.5 Goles",
+                                "odds": m_item.odds.over_25,
+                                "ev": ev_o25,
+                                "model_prob": prediction.prob_over_25,
+                            })
+                    if tg_candidates:
+                        check_and_alert_value_bets(tg_candidates)
+                except Exception as tg_err:
+                    logger.debug("Error evaluando alertas de Telegram: %s", tg_err)
+
             save_precomputed_analysis(
                 event_id=m_item.event_id,
                 match_date=today_str,
