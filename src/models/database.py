@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -631,5 +631,63 @@ def get_portfolio_kpis() -> Dict[str, Any]:
         }
     finally:
         session.close()
+
+
+def ping_database() -> bool:
+    """Envía un pulso ultraligero a la base de datos (SELECT 1) para mantener activa la conexión en Supabase."""
+    session = SessionLocal()
+    try:
+        from sqlalchemy import text
+        session.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning(f"Error en ping_database: {e}")
+        return False
+    finally:
+        session.close()
+
+
+def purge_old_records(days_to_keep: int = 3) -> Dict[str, int]:
+    """
+    Poltica Zero-Waste para Supabase:
+    Elimina registros obsoletos de partidos finalizados y cach precomputado de ms de `days_to_keep` das.
+    NUNCA toca 'portfolio_bets' ni 'bankroll_ledger' para preservar el historial financiero y de auditora.
+    """
+    session = SessionLocal()
+    purged_counts = {"purged_precomputed": 0, "purged_matches": 0}
+    try:
+        cutoff_dt = datetime.utcnow() - timedelta(days=days_to_keep)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+
+        # 1. Purgar cach de precomputados viejos (> 3 das)
+        del_precomp = (
+            session.query(PrecomputedMatchRecord)
+            .filter(PrecomputedMatchRecord.match_date < cutoff_str)
+            .delete(synchronize_session=False)
+        )
+        purged_counts["purged_precomputed"] = del_precomp or 0
+
+        # 2. Purgar partidos viejos finalizados
+        del_matches = (
+            session.query(MatchRecord)
+            .filter(
+                MatchRecord.start_time_utc < cutoff_dt,
+                MatchRecord.status_type.in_(["finished", "canceled", "postponed"])
+            )
+            .delete(synchronize_session=False)
+        )
+        purged_counts["purged_matches"] = del_matches or 0
+
+        session.commit()
+        if purged_counts["purged_precomputed"] > 0 or purged_counts["purged_matches"] > 0:
+            logger.info(f"Purga Zero-Waste completada: {purged_counts}")
+        return purged_counts
+    except Exception as e:
+        session.rollback()
+        logger.warning(f"Error ejecutando purge_old_records: {e}")
+        return purged_counts
+    finally:
+        session.close()
+
 
 

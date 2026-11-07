@@ -1207,67 +1207,58 @@ def plot_market_accuracy_chart(breakdown: Dict[str, Any]) -> go.Figure:
     return fig
 
 
-@st.cache_data(ttl=1200, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]:
-    """Carga rápida de todos los partidos de la fecha con prioridad de caché Supabase (0.2s) y fallback automático."""
-    # 0. Si no se solicitan todas las ligas del mundo, verificar si ya existen datos precalculados en Supabase
-    if not include_all_leagues:
-        try:
-            precomputed_records = get_precomputed_matches_for_date(date_str)
-            if precomputed_records:
-                matches: List[MatchDetailSchema] = []
-                precomputed_deep_cache: Dict[int, Dict[str, Any]] = {}
-                precomputed_preds: Dict[int, MatchPrediction] = {}
-                fs_lookup: Dict[tuple[int, int], str] = {}
+    """Carga ultrarrápida de todos los partidos de la fecha con enriquecimiento de Supabase Turbo Cache."""
+    precomputed_records = []
+    precomputed_deep_cache: Dict[int, Dict[str, Any]] = {}
+    precomputed_preds: Dict[int, MatchPrediction] = {}
+    fs_lookup: Dict[tuple[int, int], str] = {}
 
-                for r in precomputed_records:
+    # 0. Consultar caché precalculado de Supabase (0.02s)
+    try:
+        precomputed_records = get_precomputed_matches_for_date(date_str)
+        for r in precomputed_records:
+            try:
+                eid = r["event_id"]
+                deep_data = r.get("deep_analysis") or {}
+                pred_obj = None
+                if r.get("prediction"):
                     try:
-                        m_obj = MatchDetailSchema.model_validate(r["match_detail"])
-                        matches.append(m_obj)
+                        pred_obj = MatchPrediction.model_validate(r["prediction"])
+                        precomputed_preds[eid] = pred_obj
+                    except Exception as pred_err:
+                        logger.debug("Error parseando prediccion para %s: %s", eid, pred_err)
 
-                        deep_data = r.get("deep_analysis") or {}
-                        pred_obj = None
-                        if r.get("prediction"):
-                            try:
-                                pred_obj = MatchPrediction.model_validate(r["prediction"])
-                                precomputed_preds[m_obj.event_id] = pred_obj
-                            except Exception as pred_err:
-                                logger.warning(f"Error parseando prediccion para {m_obj.event_id}: {pred_err}")
+                fs_id = deep_data.get("flashscore_id", "N/A")
+                if r.get("match_detail"):
+                    m_raw = r["match_detail"]
+                    h_id = m_raw.get("home_team", {}).get("id")
+                    a_id = m_raw.get("away_team", {}).get("id")
+                    if h_id and a_id:
+                        fs_lookup[(h_id, a_id)] = fs_id
 
-                        fs_id = deep_data.get("flashscore_id", "N/A")
-                        fs_lookup[(m_obj.home_team.id, m_obj.away_team.id)] = fs_id
-
-                        if "home_form" in deep_data and "away_form" in deep_data:
-                            try:
-                                precomputed_deep_cache[m_obj.event_id] = {
-                                    "match": m_obj,
-                                    "home_form": TeamFormMetrics.model_validate(deep_data["home_form"]),
-                                    "away_form": TeamFormMetrics.model_validate(deep_data["away_form"]),
-                                    "home_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("home_recent", [])],
-                                    "away_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("away_recent", [])],
-                                    "home_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("home_players", [])],
-                                    "away_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("away_players", [])],
-                                    "prediction": pred_obj,
-                                    "standings_map": deep_data.get("standings_map", {}),
-                                    "flashscore_id": fs_id,
-                                }
-                            except Exception as dec_err:
-                                logger.debug(f"Error decodificando deep data para {m_obj.event_id}: {dec_err}")
-                    except Exception as err:
-                        logger.warning(f"Error deserializando partido precalculado {r.get('event_id')}: {err}")
-
-                if matches:
-                    return {
-                        "matches": matches,
-                        "fs_total": len(matches),
-                        "fs_lookup": fs_lookup,
-                        "entity_links": [],
-                        "source": "⚡ Supabase Cloud Cache (Ultra Rápido)",
-                        "precomputed_deep_cache": precomputed_deep_cache,
-                        "precomputed_predictions": precomputed_preds,
-                    }
-        except Exception as e:
-            logger.warning(f"Error consultando caché de Supabase: {e}")
+                if "home_form" in deep_data and "away_form" in deep_data:
+                    try:
+                        m_obj_cached = MatchDetailSchema.model_validate(r["match_detail"])
+                        precomputed_deep_cache[eid] = {
+                            "match": m_obj_cached,
+                            "home_form": TeamFormMetrics.model_validate(deep_data["home_form"]),
+                            "away_form": TeamFormMetrics.model_validate(deep_data["away_form"]),
+                            "home_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("home_recent", [])],
+                            "away_recent": [MatchDetailSchema.model_validate(x) for x in deep_data.get("away_recent", [])],
+                            "home_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("home_players", [])],
+                            "away_players": [PlayerPropSchema.model_validate(x) for x in deep_data.get("away_players", [])],
+                            "prediction": pred_obj,
+                            "standings_map": deep_data.get("standings_map", {}),
+                            "flashscore_id": fs_id,
+                        }
+                    except Exception as dec_err:
+                        logger.debug("Error decodificando deep data para %s: %s", eid, dec_err)
+            except Exception as err:
+                logger.debug("Error deserializando partido precalculado: %s", err)
+    except Exception as e:
+        logger.warning(f"Error consultando caché de Supabase: {e}")
 
     sf_scraper, fs_scraper = get_scrapers()
     resolver = EntityResolver(confidence_threshold=78.0)
@@ -1294,7 +1285,20 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
         logger.warning(f"Error consultando Sofascore: {e}")
         matches = []
 
-    source_label = "Sofascore Opta"
+    source_label = "⚡ Sofascore + Supabase Turbo Cache" if precomputed_records else "Sofascore Opta"
+
+    # Fallback si Sofascore está bloqueado pero hay datos en Supabase
+    if not matches and precomputed_records:
+        matches = [MatchDetailSchema.model_validate(r["match_detail"]) for r in precomputed_records]
+        source_label = "⚡ Supabase Cloud Cache (Fallback)"
+
+    # Enriquecer cuotas y análisis precalculados de Supabase
+    if precomputed_deep_cache and matches:
+        for m in matches:
+            if m.event_id in precomputed_deep_cache:
+                cached_m = precomputed_deep_cache[m.event_id]["match"]
+                if m.odds is None and cached_m.odds:
+                    m.odds = cached_m.odds
 
     # 3. Fallback inteligente a Flashscore si Sofascore está bloqueado o vacío en la nube
     if not matches and fs_matches:
@@ -1621,7 +1625,14 @@ def render_stat_comparison_bar(label: str, val_home: float, val_away: float, uni
     st.markdown(html, unsafe_allow_html=True)
 
 
+@st.cache_resource
+def get_or_start_scheduler():
+    from src.services.scheduler import start_heartbeat_scheduler
+    return start_heartbeat_scheduler(interval_seconds=840)
+
+
 def main() -> None:
+    scheduler = get_or_start_scheduler()
     if "bet_slip" not in st.session_state:
         st.session_state["bet_slip"] = []
     if "audited_predictions_cache" not in st.session_state:
@@ -1632,6 +1643,21 @@ def main() -> None:
     with st.sidebar:
         st.markdown("## ⚽ ProSports AI v3")
         st.caption("Live Momentum • Monte Carlo 10k • Hándicaps • Fatiga • Ensamble ML • Kelly")
+
+        sched_status = scheduler.get_status()
+        status_color = "#4ade80" if sched_status["is_running"] else "#f87171"
+        st.markdown(
+            f"<div style='background-color:#1e293b; padding:8px 12px; border-radius:6px; border-left:4px solid {status_color}; font-size:0.80rem; margin:6px 0;'>"
+            f"<b>Heartbeat 24/7:</b> {'🟢 Activo' if sched_status['is_running'] else '🔴 Inactivo'} ({sched_status['cycles_count']} ciclos)<br/>"
+            f"<span style='color:#94a3b8;'>Último: {sched_status['last_run_str']} • Próx: en {sched_status['mins_until_next']}m</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("⚡ Sincronizar Ahora", help="Fuerza un ciclo de actualización y ping a Supabase", use_container_width=True):
+            with st.spinner("Sincronizando con Supabase y Sofascore..."):
+                scheduler.trigger_now()
+            st.rerun()
+
         st.divider()
 
         selected_date = st.date_input("📅 1. Selecciona la Fecha", value=date.today())
