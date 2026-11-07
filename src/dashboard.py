@@ -3161,10 +3161,10 @@ def main() -> None:
 
         # 2. PANEL DE GENERACIÓN DE CARTERA DEL DÍA
         st.markdown("### 📦 Generación de Cartera Óptima del Día")
-        tab_sure, tab_value, tab_dutch = st.tabs([
-            "🛡️ Arbitraje Seguro (0 Riesgo - Surebets)",
+        tab_value, tab_dutch, tab_sure = st.tabs([
             "📈 Inversiones de Valor (+EV con Kelly)",
             "🎯 Coberturas Dutching",
+            "🛡️ Arbitraje Seguro (0 Riesgo - Surebets)",
         ])
 
         # Recolectar datos y predicciones de los partidos para alimentar los motores
@@ -3512,40 +3512,7 @@ def main() -> None:
                 if dutch_res_12 and dutch_res_12.combined_probability >= 0.65:
                     dutching_opportunities.append(dutch_res_12)
 
-        # TAB 1: ARBITRAJE SEGURO (SUREBETS)
-        with tab_sure:
-            st.markdown("#### 🛡️ Oportunidades de Arbitraje Libre de Riesgo")
-            surebets = find_surebets(matches_odds_list, current_bankroll, min_roi=0.015)
-            if not surebets:
-                st.info(
-                    "💡 **Mercado Eficiente:** En cuotas de casa única oficial, el overround del corredor es del 105%–108% (inversa > 1.00), "
-                    "por lo que no existe arbitraje directo dentro de una misma casa de apuestas sin cruce con otras casas. "
-                    "Revisa la pestaña **'Coberturas Dutching'** e **'Inversiones de Valor (+EV)'** para apuestas con ventaja matemática y cobertura multirama."
-                )
-            else:
-                for sb in surebets:
-                    with st.container(border=True):
-                        sb_c1, sb_c2, sb_c3, sb_c4 = st.columns([1.8, 1.2, 1.2, 1.2])
-                        with sb_c1:
-                            st.markdown(f"**⚽ {sb.event_name}** (`{sb.tournament}`)")
-                            st.caption(f"Mercado: **{sb.market_type}** | Inversa: `{sb.inverse_sum:.4f}`")
-                        with sb_c2:
-                            st.metric("Stake Total", f"${sb.total_stake:.2f}")
-                        with sb_c3:
-                            st.metric("Retorno Seguro", f"${sb.guaranteed_payout:.2f}")
-                        with sb_c4:
-                            st.metric("Ganancia Neta", f"+${sb.guaranteed_profit:.2f}", f"+{sb.roi_pct:.2f}% ROI")
-
-                        # Mostrar desglose de apuestas por rama
-                        leg_cols = st.columns(len(sb.legs))
-                        for idx_leg, leg in enumerate(sb.legs):
-                            with leg_cols[idx_leg]:
-                                st.markdown(f"**{leg.pick_name}**")
-                                st.markdown(f"Cuota: `x{leg.odds:.2f}`")
-                                st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
-                                st.caption(f"Retorno si gana: ${leg.payout:.2f}")
-
-        # TAB 2: INVERSIONES DE VALOR (+EV CON KELLY)
+        # TAB 1: INVERSIONES DE VALOR (+EV CON KELLY)
         with tab_value:
             st.markdown("#### 📈 Oportunidades +EV con Criterio de Kelly Fraccional Escalado")
             st.caption("Filtros aplicados: Descarte de varianza para cuotas > 3.50, Hard Cap del 4.0% por apuesta y corte de presupuesto diario.")
@@ -3648,7 +3615,7 @@ def main() -> None:
                             else:
                                 st.error("No se pudo enviar la cartera a Telegram.")
 
-        # TAB 3: COBERTURAS DUTCHING
+        # TAB 2: COBERTURAS DUTCHING
         with tab_dutch:
             st.markdown("#### 🎯 Coberturas Dutching Balanceadas")
             st.caption("Distribuye el capital entre resultados excluyentes de alta probabilidad para garantizar un retorno idéntico si cualquiera se cumple.")
@@ -3674,6 +3641,40 @@ def main() -> None:
                                 st.markdown(f"**{leg.pick_name}**")
                                 st.markdown(f"Cuota: `x{leg.odds:.2f}`")
                                 st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
+
+        # TAB 3: ARBITRAJE SEGURO (SUREBETS)
+        with tab_sure:
+            st.markdown("#### 🛡️ Oportunidades de Arbitraje Libre de Riesgo (Surebets)")
+            surebets = find_surebets(matches_odds_list, current_bankroll, min_roi=0.015)
+            if not surebets:
+                st.info(
+                    "💡 **¿Por qué no hay Arbitraje Directo (Surebets) en esta casa?**\n\n"
+                    "El **Arbitraje Deportivo (Surebet)** de 0 riesgo matemático únicamente existe cuando se cruzan cuotas entre **dos o más casas de apuestas distintas** con opiniones divergentes (por ejemplo, apostar al Local en Bet365 y al Visitante en Pinnacle).\n\n"
+                    "En una misma casa de apuestas oficial, el corredor cobra una comisión garantizada (*overround* del 105%–108%), por lo que es imposible que exista arbitraje dentro de una sola casa.\n\n"
+                    "👉 **Para obtener ventaja matemática y ganancias reales, utiliza la pestaña 'Inversiones de Valor (+EV con Kelly)'** o **'Coberturas Dutching'**."
+                )
+            else:
+                for sb in surebets:
+                    with st.container(border=True):
+                        sb_c1, sb_c2, sb_c3, sb_c4 = st.columns([1.8, 1.2, 1.2, 1.2])
+                        with sb_c1:
+                            st.markdown(f"**⚽ {sb.event_name}** (`{sb.tournament}`)")
+                            st.caption(f"Mercado: **{sb.market_type}** | Inversa: `{sb.inverse_sum:.4f}`")
+                        with sb_c2:
+                            st.metric("Stake Total", f"${sb.total_stake:.2f}")
+                        with sb_c3:
+                            st.metric("Retorno Seguro", f"${sb.guaranteed_payout:.2f}")
+                        with sb_c4:
+                            st.metric("Ganancia Neta", f"+${sb.guaranteed_profit:.2f}", f"+{sb.roi_pct:.2f}% ROI")
+
+                        # Mostrar desglose de apuestas por rama
+                        leg_cols = st.columns(len(sb.legs))
+                        for idx_leg, leg in enumerate(sb.legs):
+                            with leg_cols[idx_leg]:
+                                st.markdown(f"**{leg.pick_name}**")
+                                st.markdown(f"Cuota: `x{leg.odds:.2f}`")
+                                st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
+                                st.caption(f"Retorno si gana: ${leg.payout:.2f}")
 
         st.divider()
 
