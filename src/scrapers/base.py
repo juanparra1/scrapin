@@ -3,6 +3,7 @@
 import hashlib
 import json
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -11,7 +12,7 @@ from src.config import CACHE_DIR, CACHE_TTL_HOURS, DEFAULT_RATE_LIMIT_SECONDS
 
 
 class BaseScraperClient:
-    """Cliente base con huella TLS de navegador Chrome real y caché inteligente."""
+    """Cliente base con huella TLS de navegador real, thread-safe y caché inteligente."""
 
     def __init__(
         self,
@@ -22,21 +23,37 @@ class BaseScraperClient:
         self.rate_limit_seconds = rate_limit_seconds
         self.use_cache = use_cache
         self.impersonate = impersonate
+        self._lock = threading.Lock()
+        self._local = threading.local()
         self._last_request_ts: float = 0.0
-        self.session = cffi_requests.Session(impersonate=self.impersonate)
-        self.session.headers.update(
-            {
-                "Accept": "*/*",
-                "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cache-Control": "no-cache",
-            }
-        )
+
+    def _get_thread_session(self) -> cffi_requests.Session:
+        """Proporciona una sesión TLS aislada y thread-safe por cada hilo de ejecución."""
+        if not hasattr(self._local, "session") or self._local.session is None:
+            s = cffi_requests.Session(impersonate=self.impersonate)
+            s.headers.update(
+                {
+                    "Accept": "*/*",
+                    "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Cache-Control": "no-cache",
+                    "Origin": "https://www.sofascore.com",
+                    "Referer": "https://www.sofascore.com/",
+                }
+            )
+            self._local.session = s
+        return self._local.session
+
+    @property
+    def session(self) -> cffi_requests.Session:
+        return self._get_thread_session()
 
     def _wait_rate_limit(self) -> None:
-        elapsed = time.time() - self._last_request_ts
-        target_delay = self.rate_limit_seconds + random.uniform(0.15, 0.65)
-        if elapsed < target_delay:
-            time.sleep(target_delay - elapsed)
+        with self._lock:
+            elapsed = time.time() - self._last_request_ts
+            target_delay = self.rate_limit_seconds + random.uniform(0.10, 0.40)
+            if elapsed < target_delay:
+                time.sleep(target_delay - elapsed)
+            self._last_request_ts = time.time()
 
     def _cache_path(self, url: str) -> Path:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
@@ -63,7 +80,8 @@ class BaseScraperClient:
         for attempt in range(1, retries + 1):
             self._wait_rate_limit()
             try:
-                response = self.session.get(url, timeout=20)
+                session = self._get_thread_session()
+                response = session.get(url, timeout=20)
                 self._last_request_ts = time.time()
 
                 if response.status_code == 404 and allow_404:

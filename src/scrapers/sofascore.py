@@ -1046,6 +1046,15 @@ class SofascoreScraper(BaseScraperClient):
                 else:
                     starter_ids.add(lp.player_id)
 
+        if unique_tournament_id and not season_id:
+            try:
+                seasons_url = f"{SOFASCORE_API_BASE}/unique-tournament/{unique_tournament_id}/seasons"
+                seasons_data = self.get_json(seasons_url, ttl_hours=24.0)
+                if seasons_data and "seasons" in seasons_data and seasons_data["seasons"]:
+                    season_id = seasons_data["seasons"][0].get("id")
+            except Exception:
+                pass
+
         if unique_tournament_id and season_id:
             url = (
                 f"{SOFASCORE_API_BASE}/team/{team_id}/unique-tournament/{unique_tournament_id}"
