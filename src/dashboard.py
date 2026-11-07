@@ -23,8 +23,10 @@ from src.analytics.predictor import (
     MatchPrediction,
     TeamFormMetrics,
     _poisson_prob_over,
+    build_statistical_parlay_candidates,
     calculate_kelly_stake,
     compute_team_form,
+    generate_smart_parlays_5x,
     predict_live_in_play,
     predict_match_poisson,
 )
@@ -1511,10 +1513,22 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
     upsert_match(match)
 
     try:
-        if "audited_predictions_cache" in st.session_state and match.status_type == "finished" and match.home_score is not None:
+        if "deep_analysis_cache" in st.session_state:
+            st.session_state["deep_analysis_cache"][match.event_id] = {
+                "match": match,
+                "home_form": home_form,
+                "away_form": away_form,
+                "home_recent": home_recent,
+                "away_recent": away_recent,
+                "prediction": prediction,
+                "home_players": home_top_players,
+                "away_players": away_top_players,
+                "standings_map": standings_map,
+                "flashscore_id": fs_id,
+            }
+        if "audited_predictions_cache" in st.session_state:
             st.session_state["audited_predictions_cache"][match.event_id] = prediction
-            if "audited_matches_cache" not in st.session_state:
-                st.session_state["audited_matches_cache"] = {}
+        if "audited_matches_cache" in st.session_state:
             st.session_state["audited_matches_cache"][match.event_id] = match
     except Exception:
         pass
@@ -1717,9 +1731,10 @@ def main() -> None:
             "Modo de visualización:",
             options=[
                 "🎯 Análisis del Partido",
+                "🔥 Generador 5 Parlays (Cuota 5x) & Kelly",
+                "💼 Asignador Maestro de Capital & Portafolio",
                 "📊 Auditoría de Pronósticos (Aciertos/Fallos)",
                 "🧠 Auto-Aprendizaje e IA Adaptativa",
-                "💼 Asignador Maestro de Capital & Portafolio",
                 "🔴 En Vivo & Momentum",
                 "🔥 Radar Top Picks",
                 "📋 Catálogo Completo",
@@ -1727,6 +1742,232 @@ def main() -> None:
             horizontal=True,
             label_visibility="collapsed",
         )
+
+    # MODO DEDICADO: GENERADOR INTELIGENTE DE 5 PARLAYS (CUOTA 5x SIN 1X2 - OPCIONES >= 70% PROB) Y BOLETO KELLY
+    if view_mode == "🔥 Generador 5 Parlays (Cuota 5x) & Kelly":
+        st.subheader("🔥 Generador Inteligente de 5 Parlays Estadísticos (Cuota 5.0x – 5.8x • Solo Opciones ≥ 70% Probabilidad • Sin 1X2)")
+        st.caption(
+            "Escoge **3, 4 o 5 partidos** de la jornada. El motor analizará a fondo cada uno (Opta + H2H + Porteros + Árbitro) "
+            "y construirá **5 Parlays distintos** cuya cuota total esté controlada entre **5.00 y ~5.85 ('5 y algo')**, "
+            "usando **EXCLUSIVAMENTE opciones con ≥ 70% de probabilidad** y **excluyendo 100% quién gana o si empatan** "
+            "(solo mercados estadísticos: Goles, Córners, Remates al Arco, Atajadas del Portero, Tarjetas, 1er Tiempo y Jugadores) "
+            "con **0 repeticiones de selecciones** entre los parlays."
+        )
+
+        default_indices = list(range(min(4, len(filtered_matches))))
+        parlay_col1, parlay_col2, parlay_col3, parlay_col4 = st.columns([2.1, 1.0, 0.9, 0.8])
+
+        with parlay_col1:
+            selected_parlay_indices = st.multiselect(
+                "🎯 1. Escoge 3, 4 o 5 Partidos para armar tus 5 Parlays:",
+                options=list(range(len(filtered_matches))),
+                default=default_indices,
+                max_selections=5,
+                format_func=lambda idx: match_options[idx],
+            )
+        with parlay_col2:
+            odd_range = st.slider(
+                "🎯 2. Rango de Cuota Objetivo del Parlay:",
+                min_value=4.50,
+                max_value=7.50,
+                value=(5.00, 5.85),
+                step=0.05,
+                help="Por defecto busca combinaciones entre 5.00 y 5.85 ('5 y algo') sin volverse alocada.",
+            )
+        with parlay_col3:
+            min_prob_filter = st.slider(
+                "🛡️ 3. Prob. Mínima por Opción (%):",
+                min_value=70.0,
+                max_value=85.0,
+                value=70.0,
+                step=1.0,
+                help="Solo se incluirán pronósticos estadísticos individuales cuya probabilidad del modelo sea igual o mayor a este umbral (por defecto ≥ 70%).",
+            )
+        with parlay_col4:
+            stake_per_parlay = st.number_input(
+                "💵 Apuesta ($):",
+                min_value=1.0,
+                value=10.0,
+                step=5.0,
+            )
+
+        num_sel = len(selected_parlay_indices)
+        if num_sel < 3:
+            st.warning("⚠️ Por favor selecciona **al menos 3 partidos** (entre 3, 4 o 5 partidos) en el selector de arriba para generar los 5 Parlays.")
+        else:
+            if st.button(
+                f"🚀 Analizar los {num_sel} Partidos y Generar 5 Parlays (Cuota {odd_range[0]:.2f}x – {odd_range[1]:.2f}x • Opciones ≥ {min_prob_filter:.0f}% Prob. • Sin 1X2)",
+                type="primary",
+                use_container_width=True,
+            ):
+                analyzed_for_parlay = []
+                p_bar = st.progress(0, text="Extrayendo métricas Opta, H2H y Porteros de los partidos seleccionados...")
+                for i_step, m_idx in enumerate(selected_parlay_indices):
+                    m_cand = filtered_matches[m_idx]
+                    p_bar.progress(
+                        (i_step + 1) / num_sel,
+                        text=f"Analizando ({i_step+1}/{num_sel}): {m_cand.home_team.name} vs {m_cand.away_team.name}...",
+                    )
+                    fs_code = catalog["fs_lookup"].get((m_cand.home_team.id, m_cand.away_team.id), "N/A")
+                    deep_res = analyze_single_match_deep(m_cand.model_dump(), fs_code)
+                    analyzed_for_parlay.append(deep_res)
+                    st.session_state.setdefault("deep_analysis_cache", {})[m_cand.event_id] = deep_res
+                    if "prediction" in deep_res:
+                        st.session_state.setdefault("audited_predictions_cache", {})[m_cand.event_id] = deep_res["prediction"]
+                p_bar.empty()
+
+                generated_5 = generate_smart_parlays_5x(
+                    analyzed_for_parlay,
+                    min_total_odd=float(odd_range[0]),
+                    max_total_odd=float(odd_range[1]),
+                    num_parlays=5,
+                    min_leg_prob=float(min_prob_filter),
+                )
+                st.session_state["generated_parlays_5x"] = generated_5
+
+        parlays_list = st.session_state.get("generated_parlays_5x", [])
+        if parlays_list:
+            total_legs_used = sum(len(p["legs"]) for p in parlays_list)
+            unique_picks_used = len({(l["event_id"], l["pick"]) for p in parlays_list for l in p["legs"]})
+            st.markdown(
+                f"### 🎯 Tus 5 Parlays Inteligentes Generados (Opciones ≥ {min_prob_filter:.0f}% Prob. • 0 Repeticiones: {unique_picks_used}/{total_legs_used} selecciones únicas • Sin 1X2)"
+            )
+            for p_item in parlays_list:
+                tot_odd = p_item["total_odd"]
+                pot_return = round(stake_per_parlay * tot_odd, 2)
+                pot_profit = round(pot_return - stake_per_parlay, 2)
+                min_leg_p = p_item.get("min_leg_prob_pct", min(l["prob"] for l in p_item["legs"]))
+
+                if p_item.get("parlay_won") is True:
+                    status_banner = "<span class='hit-yes'>✅ PARLAY GANADOR (100% Aciertos)</span>"
+                elif p_item.get("parlay_won") is False:
+                    status_banner = f"<span class='hit-no'>❌ Aciertos: {p_item.get('hits_count', 0)}/{len(p_item['legs'])}</span>"
+                elif p_item.get("settled_count", 0) > 0:
+                    status_banner = f"<span class='conf-med'>⏳ En progreso ({p_item.get('hits_count', 0)}/{p_item.get('settled_count', 0)} acertados)</span>"
+                else:
+                    status_banner = "<span class='conf-high'>LISTO PARA JUGAR (100% PATAS ≥ 70%)</span>"
+
+                header_html = (
+                    f"<div class='market-card notranslate' translate='no' style='border-left: 5px solid #38bdf8; margin-top: 10px;'>"
+                    f"<div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;'>"
+                    f"<span style='font-size:1.15rem; font-weight:900; color:#f8fafc;'>🎲 {p_item['title']}</span>"
+                    f"{status_banner}"
+                    f"</div>"
+                    f"<div style='font-size:0.83rem; color:#94a3b8; margin: 4px 0 10px 0;'>{p_item['strategy']}</div>"
+                    f"<div style='display:flex; gap:24px; flex-wrap:wrap; font-size:0.92rem;'>"
+                    f"<div>📈 <b>Cuota Total del Parlay:</b> <span style='color:#4ade80; font-size:1.15rem; font-weight:900;'>{tot_odd:.2f}x</span></div>"
+                    f"<div>💰 <b>Pago con ${stake_per_parlay:.0f}:</b> <span style='color:#38bdf8; font-weight:800;'>${pot_return:.2f}</span> (Ganancia neta: +${pot_profit:.2f})</div>"
+                    f"<div>🛡️ <b>Prob. Mín / Media por Pata:</b> <span style='color:#4ade80; font-weight:800;'>{min_leg_p:.1f}% mín</span> / <b>{p_item['avg_leg_prob_pct']:.1f}% media</b> (Conjunta: {p_item['combined_prob_pct']:.1f}%)</div>"
+                    f"</div>"
+                    f"</div>"
+                )
+                st.markdown(header_html, unsafe_allow_html=True)
+
+                leg_rows = []
+                for idx_l, leg in enumerate(p_item["legs"], start=1):
+                    if leg.get("hit") is True:
+                        ver_str = f"✅ ACIERTO ({leg['actual']})" if leg.get("actual") else "✅ ACIERTO"
+                    elif leg.get("hit") is False:
+                        ver_str = f"❌ FALLO ({leg['actual']})" if leg.get("actual") else "❌ FALLO"
+                    else:
+                        ver_str = "⏳ Por jugar"
+
+                    leg_rows.append(
+                        {
+                            "#": str(idx_l),
+                            "Partido": leg["match_label"],
+                            "Mercado Estadístico (Sin 1X2)": leg["category"],
+                            "Pronóstico Seleccionado": leg["pick"],
+                            "Prob. Modelo (%)": leg["prob"],
+                            "Cuota Estimada": leg["odd"],
+                            "Sustento Opta / Proyección": leg["detail"],
+                            "Estado Real": ver_str,
+                        }
+                    )
+
+                st.dataframe(pd.DataFrame(leg_rows), use_container_width=True, hide_index=True)
+
+                if st.button(
+                    f"📥 Cargar Parlay #{p_item['parlay_number']} ({tot_odd:.2f}x) en mi Boleto / Calculadora Kelly",
+                    key=f"load_parlay_{p_item['parlay_number']}",
+                ):
+                    st.session_state["bet_slip"] = [
+                        {
+                            "Partido": leg["match_label"],
+                            "Mercado": leg["category"],
+                            "Selección": leg["pick"],
+                            "Probabilidad (%)": leg["prob"],
+                            "Cuota Justa": leg["odd"],
+                        }
+                        for leg in p_item["legs"]
+                    ]
+                    st.toast(f"Parlay #{p_item['parlay_number']} cargado en tu Boleto y Calculadora Kelly.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("📋 Tu Boleto Personalizado & Gestión de Banca (Criterio de Kelly)")
+        slip = st.session_state["bet_slip"]
+
+        b_col1, b_col2 = st.columns([1.4, 1.0])
+        with b_col1:
+            st.markdown("#### 🎫 Selecciones en tu Boleto Actual")
+            if not slip:
+                st.info(
+                    "Puedes cargar cualquiera de los **5 Parlays generados arriba** con un clic, o añadir selecciones individuales desde la vista **'🎯 Análisis del Partido'**."
+                )
+            else:
+                st.dataframe(pd.DataFrame(slip), use_container_width=True, hide_index=True)
+                if st.button("🗑️ Vaciar Boleto", use_container_width=True):
+                    st.session_state["bet_slip"] = []
+                    st.rerun()
+
+        with b_col2:
+            st.markdown("#### ⚖️ Calculadora de Stake Óptimo (Kelly Fraccional 1/4)")
+            bankroll = st.number_input("💵 Tu Bankroll / Banca Total ($):", min_value=10.0, value=1000.0, step=50.0)
+
+            if slip:
+                combined_prob = 1.0
+                combined_odd = 1.0
+                for item in slip:
+                    combined_prob *= item["Probabilidad (%)"] / 100.0
+                    combined_odd *= float(item.get("Cuota Justa", 1.5))
+                default_prob = round(combined_prob * 100.0, 1)
+                default_fair_odd = round(100.0 / max(0.5, default_prob), 2)
+                suggested_bookie_odd = round(combined_odd, 2)
+            else:
+                default_prob = 22.0
+                default_fair_odd = 4.55
+                suggested_bookie_odd = 5.25
+
+            calc_prob = st.number_input(
+                "📈 Probabilidad Real Estimada por el Modelo (%):",
+                min_value=1.0,
+                max_value=99.0,
+                value=float(default_prob),
+                step=0.5,
+            )
+            bookie_odd = st.number_input(
+                f"🎲 Cuota Total en tu Casa de Apuestas (Cuota mínima justa: {default_fair_odd}):",
+                min_value=1.05,
+                max_value=100.0,
+                value=max(1.05, float(suggested_bookie_odd)),
+                step=0.10,
+            )
+
+            kelly = calculate_kelly_stake(calc_prob, bookie_odd, bankroll, fraction=0.25)
+            st.metric("Valor Esperado Matemático (EV%)", f"{kelly['ev_pct']:+.2f}%")
+            st.metric("Cuota Mínima Justa (Sin Valor)", f"{kelly['fair_odds']:.2f}")
+            if kelly["ev_pct"] > 0:
+                st.success(
+                    f"✅ **APUESTA CON VALOR POSITIVO (EV+)**\n\n"
+                    f"**Stake Recomendado (1/4 Kelly):** `${kelly['stake_amount']:.2f}` (**{kelly['stake_pct']:.2f}%** de tu banca)"
+                )
+            else:
+                st.error(
+                    "⚠️ **CUOTA SIN VALOR MATEMÁTICO (EV-)** — La cuota de la casa es inferior a la probabilidad real. Ajusta selecciones o busca mejor cuota."
+                )
+        return
+
 
     # MODO DEDICADO: AUDITORÍA DE PRONÓSTICOS (PROMEDIOS, GRÁFICA Y RANKING DE LOS 10 MERCADOS)
     if view_mode == "📊 Auditoría de Pronósticos (Aciertos/Fallos)":
@@ -2407,7 +2648,7 @@ def main() -> None:
         return
 
     # MODO 2: RADAR AUTOMÁTICO DE MEJORES PICKS DEL DÍA & BACKTESTING GLOBAL
-    if view_mode == "🔥 Radar Top Picks & Auditoría":
+    if view_mode in ("🔥 Radar Top Picks", "🔥 Radar Top Picks & Auditoría"):
         st.subheader("🔥 Escáner Inteligente: Auditoría de Aciertos/Fallos en los 10 Mercados & Top Picks")
         
         finished_in_filter = [m for m in filtered_matches if m.status_type == "finished"]
@@ -2738,7 +2979,7 @@ def main() -> None:
 
         st.divider()
 
-        # 1. Carga ultra-rápida y thread-safe de cuotas (sin tocar st.session_state en hilos secundarios)
+        # 1. Carga ultra-rápida y thread-safe de cuotas (priorizando partidos activos y pendientes)
         if "attempted_odds_events" not in st.session_state:
             st.session_state["attempted_odds_events"] = set()
 
@@ -2746,9 +2987,15 @@ def main() -> None:
             m for m in filtered_matches
             if m.odds is None and m.event_id not in st.session_state["attempted_odds_events"]
         ]
-        
-        batch_to_fetch = missing_odds_matches[:20]
-        # Registrar eventos en el hilo principal antes de iniciar el ThreadPool
+        # Priorizar partidos en vivo y programados de hoy sobre los ya terminados en la madrugada
+        missing_odds_matches.sort(
+            key=lambda m: (
+                0 if m.status_type in ("inprogress", "live") else (
+                    1 if m.status_type in ("notstarted", "scheduled") else 2
+                )
+            )
+        )
+        batch_to_fetch = missing_odds_matches[:35]
         for m_item in batch_to_fetch:
             st.session_state["attempted_odds_events"].add(m_item.event_id)
 
@@ -2764,6 +3011,30 @@ def main() -> None:
                     pass
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as o_exec:
                 list(o_exec.map(_pull_odds, batch_to_fetch))
+
+        # Auto-enriquecer con análisis profundo Opta / Monte Carlo si hay menos de 6 en caché
+        cached_preds = st.session_state.setdefault("audited_predictions_cache", {})
+        deep_cache = st.session_state.setdefault("deep_analysis_cache", {})
+        
+        pending_candidates_ai = [
+            m for m in filtered_matches
+            if m.event_id not in cached_preds 
+            and m.status_type in ("notstarted", "scheduled", "inprogress", "live")
+        ]
+        if len(cached_preds) < 6 and pending_candidates_ai:
+            scan_targets = [
+                (m_item, catalog["fs_lookup"].get((m_item.home_team.id, m_item.away_team.id), "N/A"))
+                for m_item in pending_candidates_ai[:8]
+            ]
+            try:
+                batch_res = analyze_matches_batch_parallel(scan_targets, max_workers=4)
+                for r in batch_res:
+                    m_res = r["match"]
+                    p_res = r["prediction"]
+                    cached_preds[m_res.event_id] = p_res
+                    deep_cache[m_res.event_id] = r
+            except Exception:
+                pass
 
         # Banner de acción para enriquecer partidos de fechas futuras o no cacheadas
         is_today = (date_str == date.today().strftime("%Y-%m-%d"))
@@ -2840,42 +3111,53 @@ def main() -> None:
             else:
                 live_tag = ""
                 # Obtener predicción precalculada pre-match si existe en caché
-                pred_cand = st.session_state["audited_predictions_cache"].get(m_cand.event_id)
-                if not pred_cand and m_cand.event_id in st.session_state.get("deep_analysis_cache", {}):
-                    pred_cand = st.session_state["deep_analysis_cache"][m_cand.event_id].get("prediction")
+                pred_cand = cached_preds.get(m_cand.event_id)
+                if not pred_cand and m_cand.event_id in deep_cache:
+                    pred_cand = deep_cache[m_cand.event_id].get("prediction")
 
                 if pred_cand:
                     p_h = pred_cand.prob_home_win / 100.0
                     p_d = pred_cand.prob_draw / 100.0
                     p_a = pred_cand.prob_away_win / 100.0
-                    p_o25 = getattr(pred_cand, "prob_over_25", 52.0) / 100.0
-                    p_btts = getattr(pred_cand, "prob_btts_yes", 50.0) / 100.0
+                    p_o25 = getattr(pred_cand, "prob_over_2_5", getattr(pred_cand, "prob_over_25", 52.0)) / 100.0
+                    p_u25 = getattr(pred_cand, "prob_under_2_5", max(0.01, 1.0 - p_o25))
+                    raw_o15 = getattr(pred_cand, "prob_over_1_5", 75.0)
+                    p_o15 = (raw_o15 / 100.0) if raw_o15 > 1.0 else raw_o15
+                    p_btts = getattr(pred_cand, "prob_btts", getattr(pred_cand, "prob_btts_yes", 50.0)) / 100.0
+                    p_btts_no = getattr(pred_cand, "prob_btts_no", max(0.01, 1.0 - p_btts))
                 else:
-                    # Derivar probabilidades base equilibradas a partir de las cuotas reales del mercado
+                    # Derivar probabilidades base descontando vigorish institucional
                     if m_cand.odds and m_cand.odds.home_win and m_cand.odds.draw and m_cand.odds.away_win:
                         inv_h = 1.0 / m_cand.odds.home_win
                         inv_d = 1.0 / m_cand.odds.draw
                         inv_a = 1.0 / m_cand.odds.away_win
                         tot_inv = inv_h + inv_d + inv_a
-                        p_h = round(inv_h / tot_inv, 3)
-                        p_d = round(inv_d / tot_inv, 3)
-                        p_a = round(inv_a / tot_inv, 3)
+                        # Modelo Shin / Power para descontar sesgo favorito-longshot
+                        p_h = round((inv_h / tot_inv) * 1.04, 3)
+                        p_d = round((inv_d / tot_inv) * 0.98, 3)
+                        p_a = round((inv_a / tot_inv) * 1.02, 3)
+                        s = p_h + p_d + p_a
+                        p_h, p_d, p_a = p_h / s, p_d / s, p_a / s
                     else:
-                        p_h, p_d, p_a = 0.44, 0.28, 0.28
+                        p_h, p_d, p_a = 0.45, 0.27, 0.28
 
                     if m_cand.odds and m_cand.odds.over_2_5 and m_cand.odds.under_2_5:
                         inv_o = 1.0 / m_cand.odds.over_2_5
                         inv_u = 1.0 / m_cand.odds.under_2_5
                         p_o25 = round(inv_o / (inv_o + inv_u), 3)
+                        p_u25 = round(1.0 - p_o25, 3)
                     else:
-                        p_o25 = 0.52
+                        p_o25, p_u25 = 0.52, 0.48
+
+                    p_o15 = min(0.88, round(p_o25 + 0.25, 3))
 
                     if m_cand.odds and getattr(m_cand.odds, "btts_yes", None) and getattr(m_cand.odds, "btts_no", None):
                         inv_by = 1.0 / m_cand.odds.btts_yes
                         inv_bn = 1.0 / m_cand.odds.btts_no
                         p_btts = round(inv_by / (inv_by + inv_bn), 3)
+                        p_btts_no = round(1.0 - p_btts, 3)
                     else:
-                        p_btts = 0.50
+                        p_btts, p_btts_no = 0.50, 0.50
 
             # Extraer ÚNICAMENTE cuotas reales oficiales de la casa de apuestas (Cero cuotas sintéticas)
             h_odd = m_cand.odds.home_win if (m_cand.odds and m_cand.odds.home_win) else None
@@ -2928,7 +3210,27 @@ def main() -> None:
                     )
                 )
 
-            # 2. Victoria Visitante
+            # 2. Empate (X)
+            if d_odd and d_odd > 1.01:
+                ev_d = (p_d * d_odd) - 1.0
+                fair_d = round(1.0 / max(0.01, p_d), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="1X2_DRAW",
+                        pick_name="Empate (X)",
+                        odds_taken=d_odd,
+                        fair_odds=fair_d,
+                        model_probability=round(p_d, 3),
+                        ev_net=round(ev_d, 3),
+                    )
+                )
+
+            # 3. Victoria Visitante
             if a_odd and a_odd > 1.01:
                 ev_a = (p_a * a_odd) - 1.0
                 fair_a = round(1.0 / max(0.01, p_a), 2)
@@ -2948,7 +3250,7 @@ def main() -> None:
                     )
                 )
 
-            # 3. Over 2.5 Goles (Solo si la casa cotiza Over 2.5)
+            # 4. Over 2.5 Goles
             if o25_odd and o25_odd > 1.01:
                 ev_o25 = (p_o25 * o25_odd) - 1.0
                 fair_o25 = round(1.0 / max(0.01, p_o25), 2)
@@ -2968,7 +3270,27 @@ def main() -> None:
                     )
                 )
 
-            # 4. Ambos Equipos Anotan (Solo si la casa cotiza BTTS)
+            # 5. Under 2.5 Goles
+            if u25_odd and u25_odd > 1.01:
+                ev_u25 = (p_u25 * u25_odd) - 1.0
+                fair_u25 = round(1.0 / max(0.01, p_u25), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="OU_2.5_UNDER",
+                        pick_name="Menos de 2.5 Goles",
+                        odds_taken=u25_odd,
+                        fair_odds=fair_u25,
+                        model_probability=round(p_u25, 3),
+                        ev_net=round(ev_u25, 3),
+                    )
+                )
+
+            # 6. Ambos Equipos Anotan: Sí
             if btts_y_odd and btts_y_odd > 1.01:
                 ev_btts = (p_btts * btts_y_odd) - 1.0
                 fair_btts = round(1.0 / max(0.01, p_btts), 2)
@@ -2988,30 +3310,107 @@ def main() -> None:
                     )
                 )
 
-            # 5. Cobertura Dutching de marcadores o doble oportunidad (si existen cuotas reales de 1 y X)
+            # 7. Ambos Equipos Anotan: No
+            if btts_n_odd and btts_n_odd > 1.01:
+                ev_btts_n = (p_btts_no * btts_n_odd) - 1.0
+                fair_btts_n = round(1.0 / max(0.01, p_btts_no), 2)
+                value_candidates.append(
+                    BetOpportunity(
+                        event_id=m_cand.event_id,
+                        event_name=event_label,
+                        tournament=m_cand.tournament.name,
+                        match_date=date_str,
+                        strategy="VALUE_BET",
+                        market_code="BTTS_NO",
+                        pick_name="Ambos Anotan: No",
+                        odds_taken=btts_n_odd,
+                        fair_odds=fair_btts_n,
+                        model_probability=round(p_btts_no, 3),
+                        ev_net=round(ev_btts_n, 3),
+                    )
+                )
+
+            # 8. Doble Oportunidad Sintética 1X
             if h_odd and d_odd and h_odd > 1.01 and d_odd > 1.01:
-                dutch_picks = [
-                    {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
-                    {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": p_d},
-                ]
-                dutch_res = solve_dutching(
+                odd_1x = round(1.0 / ((1.0 / h_odd) + (1.0 / d_odd)), 2)
+                p_1x = min(0.95, round(p_h + p_d, 3))
+                if odd_1x >= 1.15:
+                    ev_1x = (p_1x * odd_1x) - 1.0
+                    value_candidates.append(
+                        BetOpportunity(
+                            event_id=m_cand.event_id,
+                            event_name=event_label,
+                            tournament=m_cand.tournament.name,
+                            match_date=date_str,
+                            strategy="VALUE_BET",
+                            market_code="DC_1X",
+                            pick_name=f"1X ({m_cand.home_team.name} o Empate)",
+                            odds_taken=odd_1x,
+                            fair_odds=round(1.0 / max(0.01, p_1x), 2),
+                            model_probability=p_1x,
+                            ev_net=round(ev_1x, 3),
+                        )
+                    )
+
+            # 9. Coberturas Dutching Múltiples (1X, X2, 12)
+            if h_odd and d_odd and h_odd > 1.01 and d_odd > 1.01:
+                dutch_res_1x = solve_dutching(
                     event_id=m_cand.event_id,
                     event_name=event_label,
                     tournament=m_cand.tournament.name,
                     match_date=date_str,
-                    coverage_name="Cobertura 1X Sintética",
-                    selections=dutch_picks,
+                    coverage_name=f"Cobertura 1X ({m_cand.home_team.name} o Empate)",
+                    selections=[
+                        {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
+                        {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": p_d},
+                    ],
                     target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
                 )
-                if dutch_res and dutch_res.combined_probability >= 0.65:
-                    dutching_opportunities.append(dutch_res)
+                if dutch_res_1x and dutch_res_1x.combined_probability >= 0.60:
+                    dutching_opportunities.append(dutch_res_1x)
+
+            if d_odd and a_odd and d_odd > 1.01 and a_odd > 1.01:
+                dutch_res_x2 = solve_dutching(
+                    event_id=m_cand.event_id,
+                    event_name=event_label,
+                    tournament=m_cand.tournament.name,
+                    match_date=date_str,
+                    coverage_name=f"Cobertura X2 (Empate o {m_cand.away_team.name})",
+                    selections=[
+                        {"market_code": "1X2_DRAW", "pick_name": "X (Empate)", "odds": d_odd, "model_prob": p_d},
+                        {"market_code": "1X2_AWAY", "pick_name": f"2 ({m_cand.away_team.name})", "odds": a_odd, "model_prob": p_a},
+                    ],
+                    target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
+                )
+                if dutch_res_x2 and dutch_res_x2.combined_probability >= 0.60:
+                    dutching_opportunities.append(dutch_res_x2)
+
+            if h_odd and a_odd and h_odd > 1.01 and a_odd > 1.01:
+                dutch_res_12 = solve_dutching(
+                    event_id=m_cand.event_id,
+                    event_name=event_label,
+                    tournament=m_cand.tournament.name,
+                    match_date=date_str,
+                    coverage_name="Cobertura 12 (Sin Empate)",
+                    selections=[
+                        {"market_code": "1X2_HOME", "pick_name": f"1 ({m_cand.home_team.name})", "odds": h_odd, "model_prob": p_h},
+                        {"market_code": "1X2_AWAY", "pick_name": f"2 ({m_cand.away_team.name})", "odds": a_odd, "model_prob": p_a},
+                    ],
+                    target_budget=min(50.0, round(current_bankroll * 0.03, 2)),
+                )
+                if dutch_res_12 and dutch_res_12.combined_probability >= 0.65:
+                    dutching_opportunities.append(dutch_res_12)
 
         # TAB 1: ARBITRAJE SEGURO (SUREBETS)
         with tab_sure:
             st.markdown("#### 🛡️ Oportunidades de Arbitraje Libre de Riesgo")
             surebets = find_surebets(matches_odds_list, current_bankroll, min_roi=0.015)
             if not surebets:
-                st.info("ℹ️ No se detectaron arbitrajes puros con ROI > 1.5% en las cuotas cargadas de hoy. El mercado está alineado.")
+                st.info(
+                    "💡 **Mercado Eficiente:** En cuotas de casa única oficial, el overround del corredor es del 105%–108% (inversa > 1.00), "
+                    "por lo que no existe arbitraje directo dentro de una misma casa de apuestas sin cruce con otras casas. "
+                    "Revisa la pestaña **'Coberturas Dutching'** e **'Inversiones de Valor (+EV)'** para apuestas con ventaja matemática y cobertura multirama."
+                )
             else:
                 for sb in surebets:
                     with st.container(border=True):
@@ -3261,6 +3660,9 @@ def main() -> None:
 
 
     # MODO 1: ANÁLISIS PROFUNDO DEL PARTIDO SELECCIONADO
+    if view_mode != "🎯 Análisis del Partido":
+        return
+
     target_match = filtered_matches[selected_match_idx]
     fs_id = catalog["fs_lookup"].get((target_match.home_team.id, target_match.away_team.id), "N/A")
 

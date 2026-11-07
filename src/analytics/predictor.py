@@ -2057,3 +2057,1007 @@ def predict_live_in_play(
         "rem_lambda_away": round(rem_lam_away, 2),
         "time_remaining_pct": round(rem_ratio * 100.0, 1),
     }
+
+
+
+def _prob_to_bookie_odd(prob_pct: float, real_odd: Optional[float] = None) -> float:
+    """
+    Convierte una probabilidad del modelo (%) en una cuota realista de mercado estadístico / Bet Builder.
+    Para opciones de alta probabilidad (70% - 92%), las casas de apuestas ofrecen cuotas entre ~1.22 y ~1.46
+    cuando nuestro modelo Opta/H2H detecta ventaja estadística sobre la línea estándar.
+    """
+    if real_odd is not None and 1.20 <= real_odd <= 2.40:
+        return round(real_odd, 2)
+    p = max(0.35, min(0.92, prob_pct / 100.0))
+    if p >= 0.70:
+        calibrated = 1.46 - ((p - 0.70) / 0.22) * 0.24
+        return round(max(1.22, min(1.48, calibrated)), 2)
+    return round(max(1.22, min(2.35, (1.0 / p) * 0.96)), 2)
+
+
+def build_statistical_parlay_candidates(
+    match_entry: Dict[str, Any],
+    min_prob: float = 70.0,
+) -> List[Dict[str, Any]]:
+    """
+    Construye el catálogo de pronósticos candidatos de un partido EXCLUSIVAMENTE en mercados
+    estadísticos (Goles, BTTS, 1er Tiempo, Córners, Remates al Arco, Remates Totales,
+    Atajadas del Portero, Tarjetas, Goles de Equipo y Jugadores) con probabilidad >= `min_prob` (70%+).
+    EXCLUYE ESTRICTAMENTE quién gana o empata (sin 1X2, sin Doble Oportunidad, sin DNB ni Hándicaps).
+    """
+    m: MatchDetailSchema = match_entry["match"]
+    p: MatchPrediction = match_entry["prediction"]
+    h_players: List[PlayerPropSchema] = match_entry.get("home_players", [])
+    a_players: List[PlayerPropSchema] = match_entry.get("away_players", [])
+
+    h_short = m.home_team.short_name or m.home_team.name
+    a_short = m.away_team.short_name or m.away_team.name
+    match_label = f"{m.home_team.name} vs {m.away_team.name}"
+
+    is_finished = m.status_type == "finished" and m.home_score is not None and m.away_score is not None
+    hs = m.home_score or 0
+    as_ = m.away_score or 0
+    total_g = hs + as_
+    ht_g = (
+        (m.home_score_ht + m.away_score_ht)
+        if (m.home_score_ht is not None and m.away_score_ht is not None)
+        else None
+    )
+    real_sot = (
+        (m.stats.shots_on_target_home + m.stats.shots_on_target_away)
+        if (m.stats and m.stats.shots_on_target_home is not None and m.stats.shots_on_target_away is not None)
+        else None
+    )
+    real_shots = (
+        (m.stats.total_shots_home + m.stats.total_shots_away)
+        if (m.stats and m.stats.total_shots_home is not None and m.stats.total_shots_away is not None)
+        else None
+    )
+    real_crn = (
+        (m.stats.corner_kicks_home + m.stats.corner_kicks_away)
+        if (m.stats and m.stats.corner_kicks_home is not None and m.stats.corner_kicks_away is not None)
+        else None
+    )
+    real_ht_crn = (
+        (m.stats.ht_corners_home + m.stats.ht_corners_away)
+        if (m.stats and m.stats.ht_corners_home is not None and m.stats.ht_corners_away is not None)
+        else None
+    )
+    real_cards = (
+        (m.stats.yellow_cards_home + m.stats.yellow_cards_away)
+        if (m.stats and m.stats.yellow_cards_home is not None and m.stats.yellow_cards_away is not None)
+        else None
+    )
+    real_saves_h = m.stats.saves_home if (m.stats and m.stats.saves_home is not None) else None
+    real_saves_a = m.stats.saves_away if (m.stats and m.stats.saves_away is not None) else None
+    real_saves_tot = (
+        (real_saves_h + real_saves_a)
+        if (real_saves_h is not None and real_saves_a is not None)
+        else None
+    )
+
+    def _p_over(threshold: float, lam: float) -> float:
+        return round(_poisson_prob_over(threshold, lam) * 100.0, 1)
+
+    def _p_under(threshold: float, lam: float) -> float:
+        return round(max(0.0, min(100.0, (1.0 - _poisson_prob_over(threshold, lam)) * 100.0)), 1)
+
+    exp_g_tot = getattr(p, "expected_goals_home", 1.3) + getattr(p, "expected_goals_away", 1.1)
+    prob_under_3_5_g = round(100.0 - getattr(p, "prob_over_3_5", 30.0), 1)
+    prob_under_4_5_g = _p_under(4, exp_g_tot)
+    prob_1h_under_2_5_g = _p_under(2, getattr(p, "expected_1h_goals_total", exp_g_tot * 0.45))
+    exp_saves = getattr(p, "expected_saves_total", 6.5)
+    prob_over_3_5_saves = _p_over(3, exp_saves)
+    prob_under_7_5_saves = _p_under(7, exp_saves)
+    prob_under_8_5_saves = _p_under(8, exp_saves)
+    exp_sot = getattr(p, "expected_sot_total", 8.8)
+    prob_over_6_5_sot = _p_over(6, exp_sot)
+    prob_under_10_5_sot = _p_under(10, exp_sot)
+    prob_under_11_5_sot = _p_under(11, exp_sot)
+    exp_shots = getattr(p, "expected_shots_total", 24.0)
+    prob_over_19_5_shots = _p_over(19, exp_shots)
+    prob_over_20_5_shots = _p_over(20, exp_shots)
+    prob_over_21_5_shots = _p_over(21, exp_shots)
+    prob_under_26_5_shots = round(100.0 - getattr(p, "prob_over_26_5_shots", 35.0), 1)
+    prob_under_27_5_shots = _p_under(27, exp_shots)
+    prob_under_28_5_shots = _p_under(28, exp_shots)
+    exp_corners = getattr(p, "expected_corners_total", 9.8)
+    prob_over_6_5_corners = _p_over(6, exp_corners)
+    prob_over_7_5_corners = _p_over(7, exp_corners)
+    prob_under_11_5_corners = _p_under(11, exp_corners)
+    prob_under_12_5_corners = _p_under(12, exp_corners)
+    exp_1h_corners = getattr(p, "expected_1h_corners", exp_corners * 0.46)
+    prob_1h_over_3_5_corners = _p_over(3, exp_1h_corners)
+    prob_1h_under_5_5_corners = _p_under(5, exp_1h_corners)
+    exp_cards = getattr(p, "expected_cards_total", 4.2)
+    prob_over_2_5_cards = _p_over(2, exp_cards)
+    prob_under_6_5_cards = _p_under(6, exp_cards)
+    prob_under_7_5_cards = _p_under(7, exp_cards)
+    prob_home_under_2_5_g = _p_under(2, getattr(p, "expected_goals_home", 1.3))
+    prob_home_under_3_5_g = _p_under(3, getattr(p, "expected_goals_home", 1.3))
+    prob_away_under_2_5_g = _p_under(2, getattr(p, "expected_goals_away", 1.1))
+    prob_away_under_3_5_g = _p_under(3, getattr(p, "expected_goals_away", 1.1))
+
+    raw_candidates: List[Dict[str, Any]] = [
+        # 1. Goles Totales (FT)
+        {
+            "family": "goals",
+            "category": "Goles Totales (FT)",
+            "pick": "Más de 1.5 Goles (Over 1.5)",
+            "prob": p.prob_over_1_5,
+            "odd": _prob_to_bookie_odd(p.prob_over_1_5),
+            "detail": f"xG Total Proy: {exp_g_tot:.2f} ({p.expected_goals_home:.2f} + {p.expected_goals_away:.2f})",
+            "hit": (total_g >= 2) if is_finished else None,
+            "actual": f"Goles FT: {total_g} ({hs}-{as_})" if is_finished else None,
+        },
+        {
+            "family": "goals",
+            "category": "Goles Totales (FT)",
+            "pick": "Más de 2.5 Goles (Over 2.5)",
+            "prob": p.prob_over_2_5,
+            "odd": _prob_to_bookie_odd(p.prob_over_2_5, m.odds.over_2_5 if m.odds else None),
+            "detail": f"xG Total Proy: {exp_g_tot:.2f}",
+            "hit": (total_g >= 3) if is_finished else None,
+            "actual": f"Goles FT: {total_g} ({hs}-{as_})" if is_finished else None,
+        },
+        {
+            "family": "goals",
+            "category": "Goles Totales (FT)",
+            "pick": "Menos de 2.5 Goles (Under 2.5)",
+            "prob": p.prob_under_2_5,
+            "odd": _prob_to_bookie_odd(p.prob_under_2_5, m.odds.under_2_5 if m.odds else None),
+            "detail": f"xG Total Proy: {exp_g_tot:.2f}",
+            "hit": (total_g <= 2) if is_finished else None,
+            "actual": f"Goles FT: {total_g} ({hs}-{as_})" if is_finished else None,
+        },
+        {
+            "family": "goals",
+            "category": "Goles Totales (FT)",
+            "pick": "Menos de 3.5 Goles (Under 3.5)",
+            "prob": round(100.0 - p.prob_over_3_5, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_over_3_5),
+            "detail": f"xG Total Proy: {exp_g_tot:.2f}",
+            "hit": (total_g <= 3) if is_finished else None,
+            "actual": f"Goles FT: {total_g} ({hs}-{as_})" if is_finished else None,
+        },
+        {
+            "family": "goals",
+            "category": "Goles Totales (FT)",
+            "pick": "Menos de 4.5 Goles (Under 4.5)",
+            "prob": prob_under_4_5_g,
+            "odd": _prob_to_bookie_odd(prob_under_4_5_g),
+            "detail": f"xG Total Proy: {exp_g_tot:.2f}",
+            "hit": (total_g <= 4) if is_finished else None,
+            "actual": f"Goles FT: {total_g} ({hs}-{as_})" if is_finished else None,
+        },
+        # 2. Ambos Equipos Anotan (BTTS)
+        {
+            "family": "btts",
+            "category": "Ambos Equipos Anotan",
+            "pick": "Ambos Equipos Anotan: SÍ",
+            "prob": p.prob_btts,
+            "odd": _prob_to_bookie_odd(p.prob_btts),
+            "detail": f"xG Local: {p.expected_goals_home:.2f} | xG Visita: {p.expected_goals_away:.2f}",
+            "hit": (hs >= 1 and as_ >= 1) if is_finished else None,
+            "actual": f"Marcador: {hs}-{as_}" if is_finished else None,
+        },
+        {
+            "family": "btts",
+            "category": "Ambos Equipos Anotan",
+            "pick": "Ambos Equipos Anotan: NO",
+            "prob": p.prob_btts_no,
+            "odd": _prob_to_bookie_odd(p.prob_btts_no),
+            "detail": f"Clean Sheet Proy: Loc {getattr(p, 'clean_sheet_prob_home', getattr(p, 'prob_home_clean_sheet', 25.0)):.0f}% / Vis {getattr(p, 'clean_sheet_prob_away', getattr(p, 'prob_away_clean_sheet', 20.0)):.0f}%",
+            "hit": (not (hs >= 1 and as_ >= 1)) if is_finished else None,
+            "actual": f"Marcador: {hs}-{as_}" if is_finished else None,
+        },
+        # 3. 1er Tiempo Goles (Opta 1ST)
+        {
+            "family": "ht_goals",
+            "category": "Goles 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Más de 0.5 Goles (+0.5 1H)",
+            "prob": p.prob_1h_over_0_5,
+            "odd": _prob_to_bookie_odd(p.prob_1h_over_0_5),
+            "detail": f"xG 1H Esperado (Opta): {p.expected_1h_goals_total:.2f}",
+            "hit": (ht_g >= 1) if (is_finished and ht_g is not None) else None,
+            "actual": f"Descanso 1H: {m.home_score_ht}-{m.away_score_ht}" if (is_finished and ht_g is not None) else None,
+        },
+        {
+            "family": "ht_goals",
+            "category": "Goles 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Menos de 1.5 Goles (-1.5 1H)",
+            "prob": round(100.0 - p.prob_1h_over_1_5, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_1h_over_1_5),
+            "detail": f"xG 1H Esperado (Opta): {p.expected_1h_goals_total:.2f}",
+            "hit": (ht_g <= 1) if (is_finished and ht_g is not None) else None,
+            "actual": f"Descanso 1H: {m.home_score_ht}-{m.away_score_ht}" if (is_finished and ht_g is not None) else None,
+        },
+        {
+            "family": "ht_goals",
+            "category": "Goles 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Menos de 2.5 Goles (-2.5 1H)",
+            "prob": prob_1h_under_2_5_g,
+            "odd": _prob_to_bookie_odd(prob_1h_under_2_5_g),
+            "detail": f"xG 1H Esperado (Opta): {p.expected_1h_goals_total:.2f}",
+            "hit": (ht_g <= 2) if (is_finished and ht_g is not None) else None,
+            "actual": f"Descanso 1H: {m.home_score_ht}-{m.away_score_ht}" if (is_finished and ht_g is not None) else None,
+        },
+        # 4. Atajadas del Portero (GK Saves)
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": f"🧤 {p.gk_home_name} ({h_short}): 2+ Atajadas (+1.5)",
+            "prob": p.prob_home_gk_2plus_saves,
+            "odd": _prob_to_bookie_odd(p.prob_home_gk_2plus_saves),
+            "detail": f"Proy: {p.expected_saves_home_gk:.2f} ataj. ante {p.expected_sot_away:.1f} remates al arco de {a_short}",
+            "hit": (real_saves_h >= 2) if (is_finished and real_saves_h is not None) else None,
+            "actual": f"Atajadas {p.gk_home_name}: {real_saves_h}" if (is_finished and real_saves_h is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": f"🧤 {p.gk_home_name} ({h_short}): 3+ Atajadas (+2.5)",
+            "prob": p.prob_home_gk_3plus_saves,
+            "odd": _prob_to_bookie_odd(p.prob_home_gk_3plus_saves),
+            "detail": f"Proy: {p.expected_saves_home_gk:.2f} ataj. (Media arq: {p.gk_home_hist_saves_avg:.2f}/P)",
+            "hit": (real_saves_h >= 3) if (is_finished and real_saves_h is not None) else None,
+            "actual": f"Atajadas {p.gk_home_name}: {real_saves_h}" if (is_finished and real_saves_h is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": f"🧤 {p.gk_away_name} ({a_short}): 2+ Atajadas (+1.5)",
+            "prob": p.prob_away_gk_2plus_saves,
+            "odd": _prob_to_bookie_odd(p.prob_away_gk_2plus_saves),
+            "detail": f"Proy: {p.expected_saves_away_gk:.2f} ataj. ante {p.expected_sot_home:.1f} remates al arco de {h_short}",
+            "hit": (real_saves_a >= 2) if (is_finished and real_saves_a is not None) else None,
+            "actual": f"Atajadas {p.gk_away_name}: {real_saves_a}" if (is_finished and real_saves_a is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": f"🧤 {p.gk_away_name} ({a_short}): 3+ Atajadas (+2.5)",
+            "prob": p.prob_away_gk_3plus_saves,
+            "odd": _prob_to_bookie_odd(p.prob_away_gk_3plus_saves),
+            "detail": f"Proy: {p.expected_saves_away_gk:.2f} ataj. (Media arq: {p.gk_away_hist_saves_avg:.2f}/P)",
+            "hit": (real_saves_a >= 3) if (is_finished and real_saves_a is not None) else None,
+            "actual": f"Atajadas {p.gk_away_name}: {real_saves_a}" if (is_finished and real_saves_a is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": f"🧤 {p.gk_away_name} ({a_short}): 4+ Atajadas (+3.5)",
+            "prob": p.prob_away_gk_4plus_saves,
+            "odd": _prob_to_bookie_odd(p.prob_away_gk_4plus_saves),
+            "detail": f"Proy: {p.expected_saves_away_gk:.2f} ataj. ante asedio de {h_short} ({p.expected_sot_home:.1f} SoT)",
+            "hit": (real_saves_a >= 4) if (is_finished and real_saves_a is not None) else None,
+            "actual": f"Atajadas {p.gk_away_name}: {real_saves_a}" if (is_finished and real_saves_a is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": "🧤 Más de 3.5 Atajadas Totales en el Partido",
+            "prob": prob_over_3_5_saves,
+            "odd": _prob_to_bookie_odd(prob_over_3_5_saves),
+            "detail": f"Atajadas Totales Proy: {p.expected_saves_total:.1f} ({p.expected_saves_home_gk:.1f} + {p.expected_saves_away_gk:.1f})",
+            "hit": (real_saves_tot >= 4) if (is_finished and real_saves_tot is not None) else None,
+            "actual": f"Atajadas Totales: {real_saves_tot}" if (is_finished and real_saves_tot is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": "🧤 Más de 4.5 Atajadas Totales en el Partido",
+            "prob": p.prob_over_4_5_total_saves,
+            "odd": _prob_to_bookie_odd(p.prob_over_4_5_total_saves),
+            "detail": f"Atajadas Totales Proy: {p.expected_saves_total:.1f} ({p.expected_saves_home_gk:.1f} + {p.expected_saves_away_gk:.1f})",
+            "hit": (real_saves_tot >= 5) if (is_finished and real_saves_tot is not None) else None,
+            "actual": f"Atajadas Totales: {real_saves_tot}" if (is_finished and real_saves_tot is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": "🧤 Más de 5.5 Atajadas Totales en el Partido",
+            "prob": p.prob_over_5_5_total_saves,
+            "odd": _prob_to_bookie_odd(p.prob_over_5_5_total_saves),
+            "detail": f"Atajadas Totales Proy: {p.expected_saves_total:.1f}",
+            "hit": (real_saves_tot >= 6) if (is_finished and real_saves_tot is not None) else None,
+            "actual": f"Atajadas Totales: {real_saves_tot}" if (is_finished and real_saves_tot is not None) else None,
+        },
+        {
+            "family": "gk_saves",
+            "category": "Atajadas del Portero",
+            "pick": "🧤 Menos de 8.5 Atajadas Totales en el Partido",
+            "prob": prob_under_8_5_saves,
+            "odd": _prob_to_bookie_odd(prob_under_8_5_saves),
+            "detail": f"Atajadas Totales Proy: {p.expected_saves_total:.1f}",
+            "hit": (real_saves_tot <= 8) if (is_finished and real_saves_tot is not None) else None,
+            "actual": f"Atajadas Totales: {real_saves_tot}" if (is_finished and real_saves_tot is not None) else None,
+        },
+        # 5. Remates al Arco (Shots on Target)
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Más de 6.5 Remates al Arco",
+            "prob": prob_over_6_5_sot,
+            "odd": _prob_to_bookie_odd(prob_over_6_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco ({h_short}: {p.expected_sot_home:.1f} | {a_short}: {p.expected_sot_away:.1f})",
+            "hit": (real_sot >= 7) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Más de 7.5 Remates al Arco",
+            "prob": p.prob_over_7_5_sot,
+            "odd": _prob_to_bookie_odd(p.prob_over_7_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco ({h_short}: {p.expected_sot_home:.1f} | {a_short}: {p.expected_sot_away:.1f})",
+            "hit": (real_sot >= 8) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Más de 8.5 Remates al Arco",
+            "prob": p.prob_over_8_5_sot,
+            "odd": _prob_to_bookie_odd(p.prob_over_8_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco",
+            "hit": (real_sot >= 9) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Menos de 9.5 Remates al Arco",
+            "prob": round(100.0 - p.prob_over_9_5_sot, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_over_9_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco",
+            "hit": (real_sot <= 9) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Menos de 10.5 Remates al Arco",
+            "prob": prob_under_10_5_sot,
+            "odd": _prob_to_bookie_odd(prob_under_10_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco",
+            "hit": (real_sot <= 10) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        {
+            "family": "sot",
+            "category": "Remates al Arco",
+            "pick": "Menos de 11.5 Remates al Arco",
+            "prob": prob_under_11_5_sot,
+            "odd": _prob_to_bookie_odd(prob_under_11_5_sot),
+            "detail": f"Proy: {p.expected_sot_total:.1f} al arco",
+            "hit": (real_sot <= 11) if (is_finished and real_sot is not None) else None,
+            "actual": f"Rem. Arco Reales: {real_sot}" if (is_finished and real_sot is not None) else None,
+        },
+        # 6. Remates Totales
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Más de 20.5 Remates Totales",
+            "prob": prob_over_20_5_shots,
+            "odd": _prob_to_bookie_odd(prob_over_20_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots >= 21) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Más de 21.5 Remates Totales",
+            "prob": prob_over_21_5_shots,
+            "odd": _prob_to_bookie_odd(prob_over_21_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots >= 22) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Más de 22.5 Remates Totales",
+            "prob": p.prob_over_22_5_shots,
+            "odd": _prob_to_bookie_odd(p.prob_over_22_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots >= 23) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Menos de 26.5 Remates Totales",
+            "prob": round(100.0 - p.prob_over_26_5_shots, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_over_26_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots <= 26) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Menos de 27.5 Remates Totales",
+            "prob": prob_under_27_5_shots,
+            "odd": _prob_to_bookie_odd(prob_under_27_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots <= 27) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        {
+            "family": "shots",
+            "category": "Remates Totales",
+            "pick": "Menos de 28.5 Remates Totales",
+            "prob": prob_under_28_5_shots,
+            "odd": _prob_to_bookie_odd(prob_under_28_5_shots),
+            "detail": f"Proy: {p.expected_shots_total:.1f} remates totales",
+            "hit": (real_shots <= 28) if (is_finished and real_shots is not None) else None,
+            "actual": f"Remates Reales: {real_shots}" if (is_finished and real_shots is not None) else None,
+        },
+        # 7. Córners (FT y 1H)
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Más de 7.5 Córners (FT)",
+            "prob": prob_over_7_5_corners,
+            "odd": _prob_to_bookie_odd(prob_over_7_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f} ({h_short}: {p.expected_corners_home:.1f} | {a_short}: {p.expected_corners_away:.1f})",
+            "hit": (real_crn >= 8) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Más de 8.5 Córners (FT)",
+            "prob": p.prob_over_8_5_corners,
+            "odd": _prob_to_bookie_odd(p.prob_over_8_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f} ({h_short}: {p.expected_corners_home:.1f} | {a_short}: {p.expected_corners_away:.1f})",
+            "hit": (real_crn >= 9) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Más de 9.5 Córners (FT)",
+            "prob": p.prob_over_9_5_corners,
+            "odd": _prob_to_bookie_odd(p.prob_over_9_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f}",
+            "hit": (real_crn >= 10) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Menos de 10.5 Córners (FT)",
+            "prob": round(100.0 - p.prob_over_10_5_corners, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_over_10_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f}",
+            "hit": (real_crn <= 10) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Menos de 11.5 Córners (FT)",
+            "prob": prob_under_11_5_corners,
+            "odd": _prob_to_bookie_odd(prob_under_11_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f}",
+            "hit": (real_crn <= 11) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "corners",
+            "category": "Córners (Saques de Esquina)",
+            "pick": "Menos de 12.5 Córners (FT)",
+            "prob": prob_under_12_5_corners,
+            "odd": _prob_to_bookie_odd(prob_under_12_5_corners),
+            "detail": f"Córners Esperados: {p.expected_corners_total:.1f}",
+            "hit": (real_crn <= 12) if (is_finished and real_crn is not None) else None,
+            "actual": f"Córners Reales: {real_crn}" if (is_finished and real_crn is not None) else None,
+        },
+        {
+            "family": "ht_corners",
+            "category": "Córners 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Más de 3.5 Córners (+3.5 1H)",
+            "prob": prob_1h_over_3_5_corners,
+            "odd": _prob_to_bookie_odd(prob_1h_over_3_5_corners),
+            "detail": f"Córners 1H Esperados: {p.expected_1h_corners:.1f}",
+            "hit": (real_ht_crn >= 4) if (is_finished and real_ht_crn is not None) else None,
+            "actual": f"Córners 1H Reales: {real_ht_crn}" if (is_finished and real_ht_crn is not None) else None,
+        },
+        {
+            "family": "ht_corners",
+            "category": "Córners 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Más de 4.5 Córners (+4.5 1H)",
+            "prob": p.prob_1h_over_4_5_corners,
+            "odd": _prob_to_bookie_odd(p.prob_1h_over_4_5_corners),
+            "detail": f"Córners 1H Esperados: {p.expected_1h_corners:.1f}",
+            "hit": (real_ht_crn >= 5) if (is_finished and real_ht_crn is not None) else None,
+            "actual": f"Córners 1H Reales: {real_ht_crn}" if (is_finished and real_ht_crn is not None) else None,
+        },
+        {
+            "family": "ht_corners",
+            "category": "Córners 1er Tiempo (Opta 1ST)",
+            "pick": "1er Tiempo: Menos de 5.5 Córners (-5.5 1H)",
+            "prob": prob_1h_under_5_5_corners,
+            "odd": _prob_to_bookie_odd(prob_1h_under_5_5_corners),
+            "detail": f"Córners 1H Esperados: {p.expected_1h_corners:.1f}",
+            "hit": (real_ht_crn <= 5) if (is_finished and real_ht_crn is not None) else None,
+            "actual": f"Córners 1H Reales: {real_ht_crn}" if (is_finished and real_ht_crn is not None) else None,
+        },
+        # 8. Tarjetas Amarillas & Árbitro
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Más de 2.5 Tarjetas",
+            "prob": prob_over_2_5_cards,
+            "odd": _prob_to_bookie_odd(prob_over_2_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas (Árbitro: {p.referee_name or 'N/A'})",
+            "hit": (real_cards >= 3) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Más de 3.5 Tarjetas",
+            "prob": p.prob_over_3_5_cards,
+            "odd": _prob_to_bookie_odd(p.prob_over_3_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas (Árbitro: {p.referee_name or 'N/A'})",
+            "hit": (real_cards >= 4) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Más de 4.5 Tarjetas",
+            "prob": p.prob_over_4_5_cards,
+            "odd": _prob_to_bookie_odd(p.prob_over_4_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas (Árbitro: {p.referee_name or 'N/A'})",
+            "hit": (real_cards >= 5) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Menos de 5.5 Tarjetas",
+            "prob": round(100.0 - p.prob_over_5_5_cards, 1),
+            "odd": _prob_to_bookie_odd(100.0 - p.prob_over_5_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas",
+            "hit": (real_cards <= 5) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Menos de 6.5 Tarjetas",
+            "prob": prob_under_6_5_cards,
+            "odd": _prob_to_bookie_odd(prob_under_6_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas",
+            "hit": (real_cards <= 6) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        {
+            "family": "cards",
+            "category": "Tarjetas Amarillas & Árbitro",
+            "pick": "Menos de 7.5 Tarjetas",
+            "prob": prob_under_7_5_cards,
+            "odd": _prob_to_bookie_odd(prob_under_7_5_cards),
+            "detail": f"Proy: {p.expected_cards_total:.1f} tarjetas",
+            "hit": (real_cards <= 7) if (is_finished and real_cards is not None) else None,
+            "actual": f"Tarjetas Reales: {real_cards}" if (is_finished and real_cards is not None) else None,
+        },
+        # 9. Goles por Equipo Individual (Sin importar quién gane el partido)
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{h_short} Anota 1+ Gol (+0.5 Goles {h_short})",
+            "prob": p.prob_home_over_0_5,
+            "odd": _prob_to_bookie_odd(p.prob_home_over_0_5),
+            "detail": f"xG Proyectado {h_short}: {p.expected_goals_home:.2f}",
+            "hit": (hs >= 1) if is_finished else None,
+            "actual": f"Goles {h_short}: {hs}" if is_finished else None,
+        },
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{a_short} Anota 1+ Gol (+0.5 Goles {a_short})",
+            "prob": p.prob_away_over_0_5,
+            "odd": _prob_to_bookie_odd(p.prob_away_over_0_5),
+            "detail": f"xG Proyectado {a_short}: {p.expected_goals_away:.2f}",
+            "hit": (as_ >= 1) if is_finished else None,
+            "actual": f"Goles {a_short}: {as_}" if is_finished else None,
+        },
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{h_short} Menos de 2.5 Goles (-2.5 Goles {h_short})",
+            "prob": prob_home_under_2_5_g,
+            "odd": _prob_to_bookie_odd(prob_home_under_2_5_g),
+            "detail": f"xG Proyectado {h_short}: {p.expected_goals_home:.2f}",
+            "hit": (hs <= 2) if is_finished else None,
+            "actual": f"Goles {h_short}: {hs}" if is_finished else None,
+        },
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{h_short} Menos de 3.5 Goles (-3.5 Goles {h_short})",
+            "prob": prob_home_under_3_5_g,
+            "odd": _prob_to_bookie_odd(prob_home_under_3_5_g),
+            "detail": f"xG Proyectado {h_short}: {p.expected_goals_home:.2f}",
+            "hit": (hs <= 3) if is_finished else None,
+            "actual": f"Goles {h_short}: {hs}" if is_finished else None,
+        },
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{a_short} Menos de 2.5 Goles (-2.5 Goles {a_short})",
+            "prob": prob_away_under_2_5_g,
+            "odd": _prob_to_bookie_odd(prob_away_under_2_5_g),
+            "detail": f"xG Proyectado {a_short}: {p.expected_goals_away:.2f}",
+            "hit": (as_ <= 2) if is_finished else None,
+            "actual": f"Goles {a_short}: {as_}" if is_finished else None,
+        },
+        {
+            "family": "team_goals",
+            "category": "Goles por Equipo",
+            "pick": f"{a_short} Menos de 3.5 Goles (-3.5 Goles {a_short})",
+            "prob": prob_away_under_3_5_g,
+            "odd": _prob_to_bookie_odd(prob_away_under_3_5_g),
+            "detail": f"xG Proyectado {a_short}: {p.expected_goals_away:.2f}",
+            "hit": (as_ <= 3) if is_finished else None,
+            "actual": f"Goles {a_short}: {as_}" if is_finished else None,
+        },
+    ]
+
+    # 10. Jugadores Titulares — 1+ Remate al Arco o 2+ Remates Totales (Player Props >= min_prob)
+    for side_players, side_short in ((h_players, h_short), (a_players, a_short)):
+        for pl in side_players[:6]:
+            if pl.is_missing or pl.is_starter is False:
+                continue
+            if pl.prob_1plus_sot >= min_prob:
+                raw_candidates.append(
+                    {
+                        "family": "player_sot",
+                        "category": "Remate al Arco de Jugador",
+                        "pick": f"👟 {pl.name} ({side_short}): 1+ Remate al Arco (+0.5 SoT)",
+                        "prob": pl.prob_1plus_sot,
+                        "odd": _prob_to_bookie_odd(pl.prob_1plus_sot),
+                        "detail": f"Promedio: {pl.sot_per_match:.2f} Rem.Arco/P ({pl.shots_per_match:.2f} tiros/P)",
+                        "hit": None,
+                        "actual": None,
+                    }
+                )
+            elif pl.prob_2plus_shots >= min_prob:
+                raw_candidates.append(
+                    {
+                        "family": "player_sot",
+                        "category": "Remates de Jugador Titular",
+                        "pick": f"👟 {pl.name} ({side_short}): 2+ Remates Totales (+1.5 Tiros)",
+                        "prob": pl.prob_2plus_shots,
+                        "odd": _prob_to_bookie_odd(pl.prob_2plus_shots),
+                        "detail": f"Promedio: {pl.shots_per_match:.2f} tiros totales/P",
+                        "hit": None,
+                        "actual": None,
+                    }
+                )
+
+    # Filtrar ESTRICTAMENTE opciones con probabilidad >= min_prob (70.0% por defecto, tope 92.5%)
+    valid_candidates = []
+    for c in raw_candidates:
+        if min_prob <= c["prob"] <= 92.5:
+            c["event_id"] = m.event_id
+            c["match_label"] = match_label
+            c["tournament"] = m.tournament.name
+            valid_candidates.append(c)
+
+    # Ordenar por probabilidad descendente
+    valid_candidates.sort(key=lambda x: x["prob"], reverse=True)
+    return valid_candidates
+
+
+def _are_same_match_legs_compatible(leg_a: Dict[str, Any], leg_b: Dict[str, Any]) -> bool:
+    """
+    Verifica que si dos selecciones pertenecen al mismo partido (ej. cuando el usuario elige 3 o 4 partidos
+    y se requieren 5 selecciones de >=70% para llegar a cuota 5.00x - 5.85x), pertenezcan a dimensiones
+    estadísticas 100% independientes y sin contradicción.
+    """
+    if leg_a["pick"] == leg_b["pick"] or leg_a["family"] == leg_b["family"]:
+        return False
+    # Agrupar familias correlacionadas para no mezclar dos mercados del mismo bloque en el mismo partido
+    correlated_groups = [
+        {"goals", "btts", "ht_goals", "team_goals"},
+        {"sot", "shots", "gk_saves", "player_sot"},
+        {"corners", "ht_corners"},
+        {"cards"},
+    ]
+    for grp in correlated_groups:
+        if leg_a["family"] in grp and leg_b["family"] in grp:
+            return False
+    return True
+
+
+def generate_smart_parlays_5x(
+    analyzed_matches: List[Dict[str, Any]],
+    min_total_odd: float = 5.00,
+    max_total_odd: float = 5.85,
+    num_parlays: int = 5,
+    min_leg_prob: float = 70.0,
+    **kwargs: Any,
+) -> List[Dict[str, Any]]:
+    """
+    Genera 5 Parlays (Combinadas) distintos a partir de los 3, 4 o 5 partidos seleccionados:
+    - Excluye 100% cualquier pronóstico de ganador o empate (sin 1X2, sin Doble Oportunidad, sin DNB).
+    - TODAS las opciones seleccionadas tienen una probabilidad del modelo >= `min_leg_prob` (70.0%+).
+    - Busca combinaciones cuya cuota total multiplicada esté entre `min_total_odd` (5.00) y `max_total_odd` (~5.85).
+    - Maximiza la probabilidad conjunta y diversifica los enfoques tácticos entre los 5 parlays.
+    """
+    import itertools
+
+    if not analyzed_matches:
+        return []
+
+    per_match_pools: List[List[Dict[str, Any]]] = []
+    for entry in analyzed_matches:
+        cands = build_statistical_parlay_candidates(entry, min_prob=min_leg_prob)
+        # Mantener hasta 18 candidatos con máxima diversidad de familias para permitir 5 parlays 100% disjuntos
+        if len(cands) > 18:
+            by_fam: Dict[str, List[Dict[str, Any]]] = {}
+            for item in cands:
+                by_fam.setdefault(item["family"], []).append(item)
+            merged: List[Dict[str, Any]] = []
+            for fam_list in by_fam.values():
+                merged.extend(fam_list[:3])
+            seen_picks = {it["pick"] for it in merged}
+            for item in cands:
+                if len(merged) >= 18:
+                    break
+                if item["pick"] not in seen_picks:
+                    seen_picks.add(item["pick"])
+                    merged.append(item)
+            cands = merged
+        per_match_pools.append(cands)
+
+    if any(len(pool) == 0 for pool in per_match_pools):
+        return []
+
+    k_matches = len(per_match_pools)
+
+    # Configuraciones de patas:
+    # 5 partidos: 1 selección por partido = 5 patas
+    # 4 partidos: 4 partidos + 1 independiente = 5 patas
+    # 3 partidos: 3 partidos + 2 independientes = 5 patas
+    slot_configurations: List[List[int]] = []
+    if k_matches >= 5:
+        slot_configurations.append([0, 1, 2, 3, 4])
+    elif k_matches == 4:
+        slot_configurations.extend(
+            [
+                [0, 1, 2, 3, 0],
+                [0, 1, 2, 3, 1],
+                [0, 1, 2, 3, 2],
+                [0, 1, 2, 3, 3],
+                [0, 1, 2, 3],
+            ]
+        )
+    elif k_matches == 3:
+        slot_configurations.extend(
+            [
+                [0, 1, 2, 0, 1],
+                [0, 1, 2, 0, 2],
+                [0, 1, 2, 1, 2],
+                [0, 1, 2, 0],
+                [0, 1, 2, 1],
+            ]
+        )
+    else:
+        slot_configurations.append(list(range(k_matches)))
+
+    valid_combos: List[Dict[str, Any]] = []
+    seen_combo_signatures: set[frozenset[tuple[int, str]]] = set()
+
+    tolerance_steps = [
+        (min_total_odd, max_total_odd),
+        (min_total_odd, max_total_odd + 0.35),
+        (max(4.80, min_total_odd - 0.20), max_total_odd + 0.60),
+        (max(4.50, min_total_odd - 0.50), max_total_odd + 0.90),
+    ]
+
+    for low_b, high_b in tolerance_steps:
+        for slot_idxs in slot_configurations:
+            # Tomar los mejores candidatos por slot para evitar explosión combinatoria
+            pools_for_slots = [per_match_pools[idx][:12] for idx in slot_idxs]
+            for combo in itertools.product(*pools_for_slots):
+                if any(leg["prob"] < min_leg_prob for leg in combo):
+                    continue
+
+                # Si hay 2 patas del mismo partido, deben ser de bloques estadísticos independientes
+                compatible = True
+                n_legs = len(combo)
+                for i in range(n_legs):
+                    for j in range(i + 1, n_legs):
+                        if combo[i]["event_id"] == combo[j]["event_id"]:
+                            if not _are_same_match_legs_compatible(combo[i], combo[j]):
+                                compatible = False
+                                break
+                    if not compatible:
+                        break
+                if not compatible:
+                    continue
+
+                total_odd = 1.0
+                combined_prob = 1.0
+                for leg in combo:
+                    total_odd *= leg["odd"]
+                    combined_prob *= leg["prob"] / 100.0
+
+                if low_b <= total_odd <= high_b:
+                    sig = frozenset((leg["event_id"], leg["pick"]) for leg in combo)
+                    if sig in seen_combo_signatures:
+                        continue
+                    seen_combo_signatures.add(sig)
+
+                    families = {leg["family"] for leg in combo}
+                    valid_combos.append(
+                        {
+                            "legs": list(combo),
+                            "total_odd": round(total_odd, 2),
+                            "combined_prob_pct": round(combined_prob * 100.0, 2),
+                            "avg_leg_prob_pct": round(
+                                sum(leg["prob"] for leg in combo) / len(combo), 1
+                            ),
+                            "min_leg_prob_pct": round(
+                                min(leg["prob"] for leg in combo), 1
+                            ),
+                            "families": families,
+                        }
+                    )
+        if len(valid_combos) >= num_parlays * 10:
+            break
+
+    if not valid_combos:
+        target_mid = (min_total_odd + max_total_odd) / 2.0
+        all_possible: List[Dict[str, Any]] = []
+        for slot_idxs in slot_configurations:
+            pools_for_slots = [per_match_pools[idx][:12] for idx in slot_idxs]
+            for combo in itertools.product(*pools_for_slots):
+                if any(leg["prob"] < min_leg_prob for leg in combo):
+                    continue
+                compatible = True
+                for i in range(len(combo)):
+                    for j in range(i + 1, len(combo)):
+                        if combo[i]["event_id"] == combo[j]["event_id"] and not _are_same_match_legs_compatible(combo[i], combo[j]):
+                            compatible = False
+                            break
+                    if not compatible:
+                        break
+                if not compatible:
+                    continue
+                total_odd = 1.0
+                combined_prob = 1.0
+                for leg in combo:
+                    total_odd *= leg["odd"]
+                    combined_prob *= leg["prob"] / 100.0
+                sig = frozenset((leg["event_id"], leg["pick"]) for leg in combo)
+                if sig in seen_combo_signatures:
+                    continue
+                seen_combo_signatures.add(sig)
+                all_possible.append(
+                    {
+                        "legs": list(combo),
+                        "total_odd": round(total_odd, 2),
+                        "combined_prob_pct": round(combined_prob * 100.0, 2),
+                        "avg_leg_prob_pct": round(
+                            sum(leg["prob"] for leg in combo) / len(combo), 1
+                        ),
+                        "min_leg_prob_pct": round(
+                            min(leg["prob"] for leg in combo), 1
+                        ),
+                        "families": {leg["family"] for leg in combo},
+                    }
+                )
+        all_possible.sort(key=lambda x: (abs(x["total_odd"] - target_mid), -x["combined_prob_pct"]))
+        valid_combos = all_possible[:120]
+
+    # Definir los 5 Perfiles Tácticos de Parlay (Todos con patas >= 70% de probabilidad)
+    parlay_profiles = [
+        {
+            "title": "Parlay #1 — Blindado de Máxima Probabilidad (70%+ Opta Core)",
+            "strategy": "Prioriza las opciones de mayor probabilidad individual (>=70%) combinando las líneas más seguras de cada partido.",
+            "preferred_families": {"goals", "gk_saves", "sot", "corners", "team_goals"},
+        },
+        {
+            "title": "Parlay #2 — Especialista en Porterías & Disparos (70%+ GK Saves + SoT)",
+            "strategy": "Enfocado en Atajadas del Portero (según remates recibidos del rival), Remates al Arco y volumen de tiros con >=70% de prob.",
+            "preferred_families": {"gk_saves", "sot", "shots", "player_sot"},
+        },
+        {
+            "title": "Parlay #3 — Ritmo de Bandas, Córners & 1er Tiempo (70%+ Opta 1ST)",
+            "strategy": "Aprovecha la presión en el último tercio para Córners (FT/1H) y Goles en el 1er Tiempo con probabilidad >=70%.",
+            "preferred_families": {"corners", "ht_corners", "ht_goals", "btts"},
+        },
+        {
+            "title": "Parlay #4 — Fricción Arbitral, Tarjetas & Goles por Equipo (70%+)",
+            "strategy": "Cruza el rigor del árbitro asignado (Tarjetas), Goles Individuales por Equipo y Atajadas con >=70% de probabilidad.",
+            "preferred_families": {"cards", "team_goals", "gk_saves", "goals"},
+        },
+        {
+            "title": "Parlay #5 — Mix Estadístico Diversificado (70%+ Cobertura Cruzada)",
+            "strategy": "Alterna mercados estadísticos >=70% distintos a los Parlays anteriores para diversificar el riesgo.",
+            "preferred_families": {"btts", "shots", "cards", "corners", "player_sot", "ht_goals"},
+        },
+    ]
+
+    selected_parlays: List[Dict[str, Any]] = []
+    used_selection_keys: set[tuple[int, str]] = set()
+
+    for idx_p, prof in enumerate(parlay_profiles[:num_parlays]):
+        best_candidate = None
+        best_score = -1e9
+
+        for cand in valid_combos:
+            cand_sigs = {(leg["event_id"], leg["pick"]) for leg in cand["legs"]}
+
+            # REGLA ESTRICTA DEL USUARIO: CERO REPETICIÓN DE SELECCIONES ENTRE LOS PARLAYS
+            # Si cualquiera de las patas ya fue usada en otro Parlay anterior, descartar inmediatamente
+            if cand_sigs.intersection(used_selection_keys):
+                continue
+
+            # Puntaje base: probabilidad promedio y probabilidad combinada
+            score = (cand["avg_leg_prob_pct"] * 2.5) + (cand["combined_prob_pct"] * 4.0)
+
+            # Bonificación por cercanía al rango ideal (ej. 5.00x - 5.85x)
+            if min_total_odd <= cand["total_odd"] <= (min_total_odd + 0.65):
+                score += 25.0
+            elif (min_total_odd + 0.65) < cand["total_odd"] <= max_total_odd:
+                score += 15.0
+            else:
+                score -= abs(cand["total_odd"] - ((min_total_odd + max_total_odd) / 2.0)) * 6.0
+
+            # Bonificación por afinidad con las familias del perfil táctico
+            fam_matches = sum(
+                1 for leg in cand["legs"] if leg["family"] in prof["preferred_families"]
+            )
+            score += fam_matches * 12.0
+
+            # Bonificación por variedad de mercados dentro del mismo parlay
+            score += len(cand["families"]) * 5.0
+
+            if score > best_score:
+                best_score = score
+                best_candidate = cand
+
+        # Si ningún combo cumple el filtro táctico sin colisionar con selecciones usadas,
+        # seleccionar el mejor combo disponible que mantenga la regla de CERO REPETICIÓN
+        if best_candidate is None:
+            for cand in valid_combos:
+                cand_sigs = {(leg["event_id"], leg["pick"]) for leg in cand["legs"]}
+                if not cand_sigs.intersection(used_selection_keys):
+                    best_candidate = cand
+                    break
+
+        if best_candidate:
+            for leg in best_candidate["legs"]:
+                used_selection_keys.add((leg["event_id"], leg["pick"]))
+
+            legs_hits = [leg["hit"] for leg in best_candidate["legs"] if leg["hit"] is not None]
+            all_settled = len(legs_hits) == len(best_candidate["legs"]) and len(legs_hits) > 0
+            parlay_won = all(h is True for h in legs_hits) if all_settled else None
+
+            selected_parlays.append(
+                {
+                    "parlay_number": idx_p + 1,
+                    "title": prof["title"],
+                    "strategy": prof["strategy"],
+                    "total_odd": best_candidate["total_odd"],
+                    "combined_prob_pct": best_candidate["combined_prob_pct"],
+                    "avg_leg_prob_pct": best_candidate["avg_leg_prob_pct"],
+                    "min_leg_prob_pct": best_candidate["min_leg_prob_pct"],
+                    "legs": best_candidate["legs"],
+                    "hits_count": sum(1 for h in legs_hits if h is True),
+                    "settled_count": len(legs_hits),
+                    "parlay_won": parlay_won,
+                }
+            )
+
+    return selected_parlays
