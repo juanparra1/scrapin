@@ -63,8 +63,9 @@ class SofascoreScraper(BaseScraperClient):
         """
         cat_url = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/-18000/categories"
         cat_payload = self.get_json(cat_url, ttl_hours=0.5)
-        if not cat_payload or "categories" not in cat_payload:
-            return []
+        if not cat_payload or "categories" not in cat_payload or not cat_payload["categories"]:
+            cat_url_utc0 = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/0/categories"
+            cat_payload = self.get_json(cat_url_utc0, ttl_hours=0.5)
 
         matches: List[MatchDetailSchema] = []
         seen_event_ids: set[int] = set()
@@ -72,22 +73,27 @@ class SofascoreScraper(BaseScraperClient):
         active_top_tournaments: List[int] = []
         active_categories: List[int] = []
 
-        sorted_cats = sorted(
-            cat_payload["categories"],
-            key=lambda c: (
-                c.get("category", {}).get("priority", 0),
-                c.get("totalEvents", 0),
-            ),
-            reverse=True,
-        )
+        if cat_payload and "categories" in cat_payload and cat_payload["categories"]:
+            sorted_cats = sorted(
+                cat_payload["categories"],
+                key=lambda c: (
+                    c.get("category", {}).get("priority", 0),
+                    c.get("totalEvents", 0),
+                ),
+                reverse=True,
+            )
 
-        for item in sorted_cats:
-            cat_id = item.get("category", {}).get("id")
-            if cat_id:
-                active_categories.append(int(cat_id))
-            for ut_id in item.get("uniqueTournamentIds", []):
-                if ut_id in TOP_TOURNAMENTS and ut_id not in active_top_tournaments:
-                    active_top_tournaments.append(int(ut_id))
+            for item in sorted_cats:
+                cat_id = item.get("category", {}).get("id")
+                if cat_id:
+                    active_categories.append(int(cat_id))
+                for ut_id in item.get("uniqueTournamentIds", []):
+                    if ut_id in TOP_TOURNAMENTS and ut_id not in active_top_tournaments:
+                        active_top_tournaments.append(int(ut_id))
+
+        # Fallback de alta resiliencia: Si categories no trajo torneos, usar el catálogo TOP canónico
+        if not active_top_tournaments:
+            active_top_tournaments = list(TOP_TOURNAMENTS)
 
         def _fetch_tourney(ut_id: int):
             t_url = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{date_str}"

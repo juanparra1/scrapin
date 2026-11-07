@@ -1462,6 +1462,14 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                     }
                 )
 
+    if not matches:
+        try:
+            matches = sf_scraper.get_scheduled_events(date_str=date_str, only_top_tournaments=True)
+            if matches:
+                source_label = "⚡ Sofascore Opta (Rescate Directo)"
+        except Exception:
+            pass
+
     return {
         "matches": matches,
         "fs_total": len(fs_matches),
@@ -1798,6 +1806,19 @@ def main() -> None:
 
         if st.button("🔄 Forzar Recarga (Limpiar Caché)", use_container_width=True):
             st.cache_data.clear()
+            st.cache_resource.clear()
+            # Limpiar caché de archivos temporales en disco
+            from src.config import CACHE_DIR
+            try:
+                for f in CACHE_DIR.glob("*.json"):
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
+            # Limpiar memoria de la sesión
+            st.session_state.pop("audited_matches_cache", None)
+            st.session_state.pop("audited_predictions_cache", None)
+            st.session_state.pop("deep_analysis_cache", None)
+            st.session_state.pop("attempted_odds_events", None)
             st.rerun()
 
     # SELECTOR DE MODO SUPERIOR (6 Modos con Auditoría Destacada)
