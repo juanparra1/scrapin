@@ -1265,6 +1265,9 @@ def plot_market_accuracy_chart(breakdown: Dict[str, Any]) -> go.Figure:
     return fig
 
 
+_PRECOMPUTED_DEEP_MEMORY_CACHE: Dict[int, Dict[str, Any]] = {}
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]:
     """Carga ultrarrápida de todos los partidos de la fecha con enriquecimiento de Supabase Turbo Cache."""
@@ -1299,7 +1302,7 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                 if "home_form" in deep_data and "away_form" in deep_data:
                     try:
                         m_obj_cached = MatchDetailSchema.model_validate(r["match_detail"])
-                        precomputed_deep_cache[eid] = {
+                        deep_entry = {
                             "match": m_obj_cached,
                             "home_form": TeamFormMetrics.model_validate(deep_data["home_form"]),
                             "away_form": TeamFormMetrics.model_validate(deep_data["away_form"]),
@@ -1311,6 +1314,8 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                             "standings_map": deep_data.get("standings_map", {}),
                             "flashscore_id": fs_id,
                         }
+                        precomputed_deep_cache[eid] = deep_entry
+                        _PRECOMPUTED_DEEP_MEMORY_CACHE[eid] = deep_entry
                     except Exception as dec_err:
                         logger.debug("Error decodificando deep data para %s: %s", eid, dec_err)
             except Exception as err:
@@ -1319,26 +1324,41 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
         logger.warning(f"Error consultando caché de Supabase: {e}")
 
     sf_scraper, fs_scraper = get_scrapers()
+
+    # FAST-PATH INSTANTÁNEO (< 0.05s): Si Supabase ya tiene la jornada precalculada y no se piden ligas menores
+    if precomputed_records and not include_all_leagues:
+        matches_cached: List[MatchDetailSchema] = []
+        for r in precomputed_records:
+            if r.get("match_detail"):
+                try:
+                    m_obj = MatchDetailSchema.model_validate(r["match_detail"])
+                    if m_obj.event_id in precomputed_deep_cache:
+                        cached_m = precomputed_deep_cache[m_obj.event_id]["match"]
+                        if m_obj.odds is None and cached_m.odds:
+                            m_obj.odds = cached_m.odds
+                    matches_cached.append(m_obj)
+                except Exception:
+                    pass
+        if matches_cached:
+            matches_cached.sort(key=lambda m: m.start_timestamp)
+            return {
+                "matches": matches_cached,
+                "fs_total": len(matches_cached),
+                "fs_lookup": fs_lookup,
+                "entity_links": [],
+                "source": "⚡ Supabase Turbo Cache (Instantáneo)",
+                "precomputed_predictions": precomputed_preds,
+                "precomputed_deep_cache": precomputed_deep_cache,
+            }
+
     resolver = EntityResolver(confidence_threshold=78.0)
 
-    # 1. Extraer partidos de Flashscore (CDN global de alta disponibilidad)
-    try:
-        t_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-        day_offset = max(-7, min(7, (t_dt - date.today()).days))
-        fs_matches = fs_scraper.get_daily_matches(day_offset=day_offset)
-    except Exception as e:
-        logger.warning(f"Error consultando Flashscore: {e}")
-        fs_matches = []
-
-    # 2. Consultar partidos de Sofascore
+    # 1. Consultar partidos de Sofascore (con Circuit Breaker instantáneo si la IP en la nube está bloqueada)
+    matches: List[MatchDetailSchema] = []
     try:
         matches = sf_scraper.get_scheduled_events(
             date_str=date_str, only_top_tournaments=not include_all_leagues
         )
-        if not matches and not include_all_leagues:
-            matches = sf_scraper.get_scheduled_events(
-                date_str=date_str, only_top_tournaments=False
-            )
     except Exception as e:
         logger.warning(f"Error consultando Sofascore: {e}")
         matches = []
@@ -1347,7 +1367,7 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
 
     # Fallback si Sofascore está bloqueado pero hay datos en Supabase
     if not matches and precomputed_records:
-        matches = [MatchDetailSchema.model_validate(r["match_detail"]) for r in precomputed_records]
+        matches = [MatchDetailSchema.model_validate(r["match_detail"]) for r in precomputed_records if r.get("match_detail")]
         source_label = "⚡ Supabase Cloud Cache (Fallback)"
 
     # Enriquecer cuotas y análisis precalculados de Supabase
@@ -1357,6 +1377,23 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                 cached_m = precomputed_deep_cache[m.event_id]["match"]
                 if m.odds is None and cached_m.odds:
                     m.odds = cached_m.odds
+
+    # 2. Extraer partidos de Flashscore (solo cuando se necesita cruce o como fallback si Sofascore está bloqueado)
+    fs_matches = []
+    try:
+        col_today = datetime.now(timezone(timedelta(hours=-5))).date()
+        t_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        day_offset = max(-7, min(7, (t_dt - col_today).days))
+        fs_matches = list(fs_scraper.get_daily_matches(day_offset=day_offset))
+        # Si es fallback (sin partidos de Sofascore), consultar también day_offset + 1 por el corte de medianoche CET vs Colombia UTC-5
+        if not matches and day_offset < 7:
+            seen_fs_ids = {f.flashscore_id for f in fs_matches}
+            for f_next in fs_scraper.get_daily_matches(day_offset=day_offset + 1):
+                if f_next.flashscore_id not in seen_fs_ids:
+                    fs_matches.append(f_next)
+    except Exception as e:
+        logger.warning(f"Error consultando Flashscore: {e}")
+        fs_matches = []
 
     # 3. Fallback inteligente a Flashscore si Sofascore está bloqueado o vacío en la nube
     if not matches and fs_matches:
@@ -1368,20 +1405,19 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
             "arabia saudita", "turkey", "turquía", "turquia", "brazil",
             "brasil", "portugal", "mexico", "méxico", "europe", "europa",
             "south america", "sudamérica", "sudamerica", "world", "mundo",
-            "international", "internacional", "concacaf", "conmebol", "uefa"
+            "international", "internacional", "concacaf", "conmebol", "uefa",
+            "nations league"
         }
 
         for fsm in fs_matches:
             try:
                 parts = fsm.tournament_title.split(":")
                 raw_country = parts[0].strip() if len(parts) > 1 else fsm.country
-                country_clean = raw_country.lower()
+                country_clean = (raw_country + " " + fsm.tournament_title).lower()
 
-                # Si no está marcado "Cargar todas las ligas", filtrar solo por las 12 ligas, copas y torneos internacionales solicitados
                 if not include_all_leagues and not any(c in country_clean for c in curated_countries):
                     continue
 
-                # Filtrar que el partido de Flashscore realmente corresponda a la fecha solicitada
                 tz_local = timezone(timedelta(hours=-5))
                 fsm_date_local = datetime.fromtimestamp(fsm.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
                 if fsm_date_local != date_str:
@@ -1418,16 +1454,13 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
             except Exception as e_fsm:
                 logger.debug(f"Error parseando partido fallback de Flashscore: {e_fsm}")
 
-    fs_lookup: Dict[tuple[int, int], str] = {}
     entity_links: List[Dict[str, Any]] = []
 
     if source_label == "Flashscore Cloud":
-        # Optimización Ultra-Rápida: Mapeo directo 1:1 sin sobrecarga de EntityResolver
         for m in matches:
             if m.custom_id:
                 fs_lookup[(m.home_team.id, m.away_team.id)] = m.custom_id
-    else:
-        # Cruce fuzzy Sofascore <-> Flashscore con registro canónico
+    elif matches and fs_matches:
         canonical_teams = []
         for m in matches:
             canonical_teams.append((m.home_team.id, m.home_team.name))
@@ -1468,20 +1501,60 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                     }
                 )
 
-    if not matches:
-        try:
-            matches = sf_scraper.get_scheduled_events(date_str=date_str, only_top_tournaments=True)
-            if matches:
-                source_label = "⚡ Sofascore Opta (Rescate Directo)"
-        except Exception:
-            pass
-
+    matches.sort(key=lambda m: m.start_timestamp)
     return {
         "matches": matches,
         "fs_total": len(fs_matches),
         "fs_lookup": fs_lookup,
         "entity_links": entity_links,
         "source": source_label,
+        "precomputed_predictions": precomputed_preds,
+        "precomputed_deep_cache": precomputed_deep_cache,
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_multi_day_catalog(start_date_str: str, days: int = 6, include_all_leagues: bool = False) -> Dict[str, Any]:
+    """
+    Agrega el catálogo de partidos desde `start_date_str` hasta `start_date_str + days`
+    para mostrar toda la Ventana FIFA (UEFA Nations League, CONCACAF Nations League, Copas y Ligas)
+    sin obligar al usuario a buscar día por día.
+    """
+    base_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    date_strs = [(base_dt + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days + 1)]
+
+    combined_matches: List[MatchDetailSchema] = []
+    seen_eids: set[int] = set()
+    combined_fs_lookup: Dict[tuple[int, int], str] = {}
+    combined_entity_links: List[Dict[str, Any]] = []
+    combined_preds: Dict[int, MatchPrediction] = {}
+    combined_deep: Dict[int, Dict[str, Any]] = {}
+    fs_total = 0
+    sources_seen: List[str] = []
+
+    for d_str in date_strs:
+        day_cat = load_day_catalog(d_str, include_all_leagues)
+        fs_total += day_cat.get("fs_total", 0)
+        if day_cat.get("source") and day_cat["source"] not in sources_seen:
+            sources_seen.append(day_cat["source"])
+        combined_fs_lookup.update(day_cat.get("fs_lookup", {}))
+        combined_entity_links.extend(day_cat.get("entity_links", []))
+        combined_preds.update(day_cat.get("precomputed_predictions", {}))
+        combined_deep.update(day_cat.get("precomputed_deep_cache", {}))
+        for m in day_cat.get("matches", []):
+            if m.event_id not in seen_eids:
+                seen_eids.add(m.event_id)
+                combined_matches.append(m)
+
+    combined_matches.sort(key=lambda m: m.start_timestamp)
+    return {
+        "matches": combined_matches,
+        "fs_total": fs_total,
+        "fs_lookup": combined_fs_lookup,
+        "entity_links": combined_entity_links,
+        "source": sources_seen[0] if sources_seen else "⚡ Supabase Turbo Cache",
+        "precomputed_predictions": combined_preds,
+        "precomputed_deep_cache": combined_deep,
     }
 
 
@@ -1494,6 +1567,12 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
     - Jugadores líderes en remates al arco, totales, goles y bajas
     - Predicción híbrida (Dixon-Coles + Monte Carlo 10k + Gradient Boosting ML)
     """
+    eid_lookup = match_dict.get("event_id")
+    if eid_lookup and eid_lookup in _PRECOMPUTED_DEEP_MEMORY_CACHE:
+        cached_entry = _PRECOMPUTED_DEEP_MEMORY_CACHE[eid_lookup]
+        if cached_entry.get("prediction") is not None and cached_entry.get("home_form") is not None:
+            return cached_entry
+
     sf_scraper, _ = get_scrapers()
     match = MatchDetailSchema.model_validate(match_dict)
 
@@ -1726,7 +1805,22 @@ def main() -> None:
 
         st.divider()
 
-        selected_date = st.date_input("📅 1. Selecciona la Fecha", value=date.today())
+        col_today = datetime.now(COLOMBIA_TZ).date()
+        selected_date = st.date_input("📅 1. Selecciona la Fecha (Hora Colombia)", value=col_today)
+
+        if "calendar_scope_mode" not in st.session_state:
+            st.session_state["calendar_scope_mode"] = "📅 Solo Fecha Seleccionada"
+
+        calendar_scope = st.radio(
+            "🗓️ Alcance del Calendario:",
+            options=[
+                "📅 Solo Fecha Seleccionada",
+                "🌍 Ventana FIFA / Próximos 6 Días (Nations League)",
+            ],
+            key="calendar_scope_mode",
+            help="En 'Solo Fecha Seleccionada' filtra estrictamente por la fecha en Hora Colombia (ideal para Auditoría). En 'Ventana FIFA / Próximos 6 Días' carga toda la jornada internacional (UEFA Nations League, CONCACAF Nations League, Copas y Ligas).",
+        )
+
         include_all = st.toggle(
             "🌍 Cargar ligas globales adicionales",
             value=False,
@@ -1734,8 +1828,25 @@ def main() -> None:
         )
 
         date_str = selected_date.strftime("%Y-%m-%d")
-        catalog = load_day_catalog(date_str, include_all)
+        is_multi_day = calendar_scope.startswith("🌍")
+        if is_multi_day:
+            catalog = load_multi_day_catalog(date_str, days=6, include_all_leagues=include_all)
+        else:
+            catalog = load_day_catalog(date_str, include_all)
         all_matches: List[MatchDetailSchema] = catalog["matches"]
+
+        if not is_multi_day and len(all_matches) < 5:
+            st.info(
+                "💡 **Día de concentración FIFA:** Los partidos de **UEFA Nations League** y **CONCACAF Nations League** se juegan del **12 al 15 de Noviembre**."
+            )
+            def _enable_fifa_window():
+                st.session_state["calendar_scope_mode"] = "🌍 Ventana FIFA / Próximos 6 Días (Nations League)"
+            st.button(
+                "🌍 Ver UEFA Nations League (Próximos 6 Días)",
+                on_click=_enable_fifa_window,
+                use_container_width=True,
+                type="primary",
+            )
 
         # Población automática de caché si proviene de Supabase precalculado (Ultra Rápido)
         if "precomputed_predictions" in catalog:
@@ -1754,7 +1865,7 @@ def main() -> None:
             "🏆 Filtrar por Torneo / Liga",
             options=["Todas las Ligas (" + str(len(all_matches)) + " partidos)"] + tournaments_available,
         )
-        search_team = st.text_input("🔎 Buscar equipo", placeholder="Ej. Barcelona, Bayern, River...")
+        search_team = st.text_input("🔎 Buscar equipo", placeholder="Ej. España, Francia, Inglaterra, Colombia...")
 
         filtered_matches = []
         for m in all_matches:
@@ -1777,11 +1888,13 @@ def main() -> None:
             match_options = []
             for m in filtered_matches:
                 if m.status_type == "finished":
-                    st_tag = f"[{m.home_score}-{m.away_score} FIN]"
+                    date_prefix = format_colombia_time(m.start_timestamp or m.start_time_utc, "%d/%m ") if is_multi_day else ""
+                    st_tag = f"[{date_prefix}{m.home_score}-{m.away_score} FIN]"
                 elif m.status_type == "inprogress":
                     st_tag = f"[{m.home_score}-{m.away_score} VIVO]"
                 else:
-                    col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, "%H:%M")
+                    fmt_str = "%d/%m %H:%M" if is_multi_day else "%H:%M"
+                    col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, fmt_str)
                     st_tag = f"[{col_time} COL]"
                 match_options.append(
                     f"{st_tag} | {m.home_team.name} vs {m.away_team.name} ({m.tournament.name})"
@@ -1827,16 +1940,16 @@ def main() -> None:
             st.session_state.pop("attempted_odds_events", None)
             st.rerun()
 
-    # SELECTOR DE MODO SUPERIOR (6 Modos con Auditoría Destacada)
+    # SELECTOR DE MODO SUPERIOR (7 Modos con Auditoría Destacada)
     top_col1, top_col2 = st.columns([1.1, 2.9])
     with top_col1:
-        st.markdown(f"### 📅 Jornada `{date_str}` ({len(filtered_matches)} P)")
+        scope_label = f"{date_str} (+6d)" if is_multi_day else date_str
+        st.markdown(f"### 📅 Jornada `{scope_label}` ({len(filtered_matches)} P)")
     with top_col2:
         view_mode = st.radio(
             "Modo de visualización:",
             options=[
                 "🎯 Análisis del Partido",
-                "🔥 Generador 5 Parlays (Cuota 5x) & Kelly",
                 "💼 Asignador Maestro de Capital & Portafolio",
                 "📊 Auditoría de Pronósticos (Aciertos/Fallos)",
                 "🧠 Auto-Aprendizaje e IA Adaptativa",

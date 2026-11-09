@@ -4,7 +4,7 @@ import concurrent.futures
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from src.config import SOFASCORE_API_BASE, TOP_TOURNAMENTS
+from src.config import PRIORITY_FALLBACK_TOURNAMENTS, SOFASCORE_API_BASE, TOP_TOURNAMENTS
 from src.models.schemas import (
     H2HMatchItemSchema,
     H2HSummarySchema,
@@ -58,14 +58,23 @@ class SofascoreScraper(BaseScraperClient):
         only_top_tournaments: bool = True,
     ) -> List[MatchDetailSchema]:
         """
-        Obtiene los partidos programados o jugados en una fecha ('YYYY-MM-DD').
-        Consulta primero las categorías activas en la fecha y luego extrae los torneos.
+        Obtiene los partidos programados o jugados en una fecha ('YYYY-MM-DD' hora Colombia UTC-5).
+        Incluye disyuntor inmediato si Sofascore bloquea la IP (HTTP 403 en Render Cloud)
+        y soporte multi-huso horario para partidos nocturnos de América y Selecciones (Nations League).
         """
+        if self.is_sofascore_blocked():
+            return []
+
         cat_url = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/-18000/categories"
         cat_payload = self.get_json(cat_url, ttl_hours=0.5)
+        if self.is_sofascore_blocked():
+            return []
+
         if not cat_payload or "categories" not in cat_payload or not cat_payload["categories"]:
             cat_url_utc0 = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/0/categories"
             cat_payload = self.get_json(cat_url_utc0, ttl_hours=0.5)
+            if self.is_sofascore_blocked():
+                return []
 
         matches: List[MatchDetailSchema] = []
         seen_event_ids: set[int] = set()
@@ -91,22 +100,43 @@ class SofascoreScraper(BaseScraperClient):
                     if ut_id in TOP_TOURNAMENTS and ut_id not in active_top_tournaments:
                         active_top_tournaments.append(int(ut_id))
 
-        # Fallback de alta resiliencia: Si categories no trajo torneos, usar el catálogo TOP canónico
-        if not active_top_tournaments:
-            active_top_tournaments = list(TOP_TOURNAMENTS)
-
-        def _fetch_tourney(ut_id: int):
-            t_url = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{date_str}"
-            return self.get_json(t_url, ttl_hours=0.5)
+        # Si hay pocos torneos detectados y Sofascore NO está bloqueado, verificar solo los 8 torneos prioritarios (Nations League, Colombia, etc.)
+        if len(active_top_tournaments) < 3 and not self.is_sofascore_blocked():
+            for p_id in PRIORITY_FALLBACK_TOURNAMENTS:
+                if p_id not in active_top_tournaments:
+                    active_top_tournaments.append(p_id)
 
         tz_local = timezone(timedelta(hours=-5))
+        try:
+            next_date_str = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        except Exception:
+            next_date_str = date_str
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exec_t:
+        # Torneos de América/Selecciones cuyos partidos nocturnos (19:00-23:59 COL) caen en el día siguiente UTC en Sofascore
+        americas_and_intl_ids = {
+            11539, 11542, 1335, 10825, 155, 1024, 11707, 325, 373, 242, 11621,
+            384, 480, 490, 377, 120, 133, 14100, 130, 10783, 1077, 851
+        }
+
+        def _fetch_tourney(ut_id: int) -> List[Dict[str, Any]]:
+            if self.is_sofascore_blocked():
+                return []
+            events_out: List[Dict[str, Any]] = []
+            t_url = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{date_str}"
+            t_data = self.get_json(t_url, ttl_hours=0.5)
+            if t_data and "events" in t_data:
+                events_out.extend(t_data["events"])
+            if ut_id in americas_and_intl_ids and next_date_str != date_str and not self.is_sofascore_blocked():
+                t_url_next = f"{SOFASCORE_API_BASE}/unique-tournament/{ut_id}/scheduled-events/{next_date_str}"
+                t_data_next = self.get_json(t_url_next, ttl_hours=0.5)
+                if t_data_next and "events" in t_data_next:
+                    events_out.extend(t_data_next["events"])
+            return events_out
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as exec_t:
             results = exec_t.map(_fetch_tourney, active_top_tournaments)
-            for t_data in results:
-                if not t_data or "events" not in t_data:
-                    continue
-                for raw in t_data["events"]:
+            for raw_list in results:
+                for raw in raw_list:
                     match_schema = self._parse_event_summary(raw)
                     if match_schema and match_schema.event_id not in seen_event_ids:
                         event_date_local = datetime.fromtimestamp(match_schema.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
@@ -114,8 +144,10 @@ class SofascoreScraper(BaseScraperClient):
                             seen_event_ids.add(match_schema.event_id)
                             matches.append(match_schema)
 
-        if not only_top_tournaments or not matches:
-            for cat_id in active_categories[:18]:
+        if not only_top_tournaments and not self.is_sofascore_blocked():
+            for cat_id in active_categories[:12]:
+                if self.is_sofascore_blocked():
+                    break
                 c_url = f"{SOFASCORE_API_BASE}/category/{cat_id}/scheduled-events/{date_str}"
                 c_data = self.get_json(c_url, ttl_hours=0.5)
                 if not c_data or "events" not in c_data:

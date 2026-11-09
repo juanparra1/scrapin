@@ -26,8 +26,13 @@ TOURNAMENT_TO_ODDS_API: Dict[str, str] = {
     "UEFA Champions League": "soccer_uefa_champs_league",
     "UEFA Europa League": "soccer_uefa_europa_league",
     "UEFA Conference League": "soccer_uefa_europa_conference_league",
+    "UEFA Nations League": "soccer_uefa_nations_league",
+    "Eliminatorias CONMEBOL (Mundial)": "soccer_fifa_world_cup_qualifiers_south_america",
+    "Eliminatorias UEFA (Mundial)": "soccer_fifa_world_cup_qualifiers_europe",
     "CONMEBOL Libertadores": "soccer_conmebol_copa_libertadores",
     "CONMEBOL Sudamericana": "soccer_conmebol_copa_sudamericana",
+    "Primera A (Apertura)": "soccer_colombia_primera_a",
+    "Primera A (Clausura)": "soccer_colombia_primera_a",
     "Liga Profesional de Fútbol": "soccer_argentina_primera_division",
     "Brasileirão Série A": "soccer_brazil_campeonato",
     "Liga Portugal Betclic": "soccer_portugal_primeira_liga",
@@ -35,6 +40,8 @@ TOURNAMENT_TO_ODDS_API: Dict[str, str] = {
     "Major League Soccer (MLS)": "soccer_usa_mls",
     "Championship": "soccer_efl_champ",
     "Liga MX": "soccer_mexico_ligamx",
+    "Copa del Rey": "soccer_spain_copa_del_rey",
+    "FA Cup": "soccer_fa_cup",
 }
 
 
@@ -90,8 +97,9 @@ class OddsAPIClient(BaseScraperClient):
         Recupera cuotas de todas las ligas seleccionadas y las normaliza.
         """
         if target_sports is None:
-            # Ligas principales por defecto para optimizar cuota
+            # Ligas principales por defecto para optimizar cuota (incluye UEFA Nations League)
             target_sports = [
+                "soccer_uefa_nations_league",
                 "soccer_epl",
                 "soccer_spain_la_liga",
                 "soccer_italy_serie_a",
@@ -99,6 +107,7 @@ class OddsAPIClient(BaseScraperClient):
                 "soccer_france_ligue_one",
                 "soccer_uefa_champs_league",
                 "soccer_uefa_europa_league",
+                "soccer_colombia_primera_a",
                 "soccer_argentina_primera_division",
                 "soccer_brazil_campeonato",
             ]

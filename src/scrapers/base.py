@@ -12,7 +12,11 @@ from src.config import CACHE_DIR, CACHE_TTL_HOURS, DEFAULT_RATE_LIMIT_SECONDS
 
 
 class BaseScraperClient:
-    """Cliente base con huella TLS de navegador real, thread-safe y caché inteligente."""
+    """Cliente base con huella TLS de navegador real, thread-safe, disyuntor anti-bloqueo y caché inteligente."""
+
+    _sofascore_blocked_until: float = 0.0
+    _sofascore_ever_succeeded: bool = False
+    _sofascore_consecutive_403: int = 0
 
     def __init__(
         self,
@@ -26,6 +30,11 @@ class BaseScraperClient:
         self._lock = threading.Lock()
         self._local = threading.local()
         self._last_request_ts: float = 0.0
+
+    @classmethod
+    def is_sofascore_blocked(cls) -> bool:
+        """Indica si el disyuntor (Circuit Breaker) de Sofascore está abierto por bloqueo de IP en la nube."""
+        return time.time() < cls._sofascore_blocked_until
 
     def _get_thread_session(self) -> cffi_requests.Session:
         """Proporciona una sesión TLS aislada y thread-safe por cada hilo de ejecución."""
@@ -48,12 +57,18 @@ class BaseScraperClient:
         return self._get_thread_session()
 
     def _wait_rate_limit(self) -> None:
+        wait_time = 0.0
         with self._lock:
-            elapsed = time.time() - self._last_request_ts
-            target_delay = self.rate_limit_seconds + random.uniform(0.10, 0.40)
-            if elapsed < target_delay:
-                time.sleep(target_delay - elapsed)
-            self._last_request_ts = time.time()
+            now = time.time()
+            target_delay = self.rate_limit_seconds + random.uniform(0.05, 0.20)
+            next_allowed = self._last_request_ts + target_delay
+            if now < next_allowed:
+                wait_time = next_allowed - now
+                self._last_request_ts = next_allowed
+            else:
+                self._last_request_ts = now
+        if wait_time > 0:
+            time.sleep(wait_time)
 
     def _cache_path(self, url: str) -> Path:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
@@ -64,9 +79,9 @@ class BaseScraperClient:
         url: str,
         ttl_hours: Optional[float] = CACHE_TTL_HOURS,
         allow_404: bool = True,
-        retries: int = 3,
+        retries: int = 2,
     ) -> Optional[Dict[str, Any]]:
-        """Obtiene JSON desde caché o red aplicando límite de velocidad y reintentos."""
+        """Obtiene JSON desde caché o red aplicando límite de velocidad y disyuntor rápido."""
         cache_file = self._cache_path(url)
 
         if self.use_cache and ttl_hours is not None and cache_file.exists():
@@ -77,17 +92,26 @@ class BaseScraperClient:
                 except Exception:
                     pass
 
+        is_sofascore = "sofascore.com" in url
+        if is_sofascore and self.is_sofascore_blocked():
+            return None
+
         for attempt in range(1, retries + 1):
             self._wait_rate_limit()
             try:
                 session = self._get_thread_session()
-                response = session.get(url, timeout=20)
-                self._last_request_ts = time.time()
+                response = session.get(url, timeout=8)
 
                 if response.status_code == 404 and allow_404:
+                    if is_sofascore:
+                        BaseScraperClient._sofascore_ever_succeeded = True
+                        BaseScraperClient._sofascore_consecutive_403 = 0
                     return None
 
                 if response.status_code == 200:
+                    if is_sofascore:
+                        BaseScraperClient._sofascore_ever_succeeded = True
+                        BaseScraperClient._sofascore_consecutive_403 = 0
                     data = response.json()
                     if self.use_cache and ttl_hours is not None:
                         cache_file.write_text(
@@ -95,15 +119,29 @@ class BaseScraperClient:
                         )
                     return data
 
-                if response.status_code in (403, 429, 503):
-                    backoff = (2 ** attempt) + random.uniform(0.5, 1.5)
+                if response.status_code == 403:
+                    if is_sofascore:
+                        BaseScraperClient._sofascore_consecutive_403 += 1
+                        # Si nunca ha conectado (IP de Render Cloud bloqueada) o lleva 3 bloqueos 403 seguidos, abrir disyuntor
+                        if not BaseScraperClient._sofascore_ever_succeeded or BaseScraperClient._sofascore_consecutive_403 >= 3:
+                            BaseScraperClient._sofascore_blocked_until = time.time() + 600.0
+                            return None
+                    backoff = (1.5 ** attempt) + random.uniform(0.3, 0.8)
+                    time.sleep(backoff)
+                    continue
+
+                if response.status_code in (429, 503):
+                    backoff = (1.8 ** attempt) + random.uniform(0.4, 1.0)
                     time.sleep(backoff)
                     continue
 
                 response.raise_for_status()
             except Exception:
+                if is_sofascore and not BaseScraperClient._sofascore_ever_succeeded and attempt >= 1:
+                    BaseScraperClient._sofascore_blocked_until = time.time() + 300.0
+                    return None
                 if attempt == retries:
-                    raise
-                time.sleep((1.5 ** attempt) + random.uniform(0.2, 0.8))
+                    return None
+                time.sleep(0.6 + random.uniform(0.2, 0.5))
 
         return None

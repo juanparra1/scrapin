@@ -93,8 +93,8 @@ class HeartbeatScheduler:
 
     def _run_loop(self) -> None:
         """Bucle continuo en segundo plano cada 14 minutos."""
-        # Ejecutar primer ciclo rápido al inicio
-        time.sleep(5)
+        # Esperar 45s en el arranque para no competir con la carga inicial de la interfaz web
+        time.sleep(45)
         while self.is_running:
             try:
                 self._execute_cycle()
@@ -285,7 +285,9 @@ class HeartbeatScheduler:
 
     def _precompute_today_top_matches(self) -> int:
         """Precomputa en paralelo con el modelo Poisson y cuotas los principales partidos de hoy."""
-        today_str = date.today().strftime("%Y-%m-%d")
+        if self._scraper.is_sofascore_blocked():
+            return 0
+        today_str = datetime.now(COLOMBIA_TZ).strftime("%Y-%m-%d")
 
         try:
             matches = self._scraper.get_scheduled_events(today_str, only_top_tournaments=True)

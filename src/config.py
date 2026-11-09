@@ -97,7 +97,20 @@ TOP_TOURNAMENTS = {
     14100: {"name": "CONCACAF Nations League", "country": "North & Central America"},
     130: {"name": "CONCACAF Gold Cup", "country": "North & Central America"},
     1077: {"name": "Amistosos Internacionales (Selecciones)", "country": "World"},
+    851: {"name": "Amistosos Internacionales FIFA", "country": "World"},
 }
+
+# Torneos clave para rescate rápido (sin disparar tormenta de 50 peticiones)
+PRIORITY_FALLBACK_TOURNAMENTS = [
+    10783,  # UEFA Nations League
+    14100,  # CONCACAF Nations League
+    851,    # International Friendly Games
+    377,    # Eliminatorias CONMEBOL
+    11539,  # Primera A Apertura (Colombia)
+    11542,  # Primera A Clausura (Colombia)
+    155,    # Liga Profesional Argentina
+    325,    # Brasileirão Série A
+]
 
 # Configuración de peticiones y Rate Limiting
 SOFASCORE_API_BASE = "https://www.sofascore.com/api/v1"
