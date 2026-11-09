@@ -8,6 +8,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: MAX_PARALLEL_WORKERS
+        value: "3"
       - key: STREAMLIT_SERVER_HEADLESS
         value: "true"
       - key: STREAMLIT_SERVER_ENABLE_CORS
