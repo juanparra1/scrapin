@@ -66,6 +66,12 @@ from src.models.schemas import (
     TournamentSchema,
 )
 from src.scrapers.flashscore import FlashscoreScraper
+from src.scrapers.odds_api_client import (
+    OddsAPIClient,
+    calculate_three_way_surebet,
+    calculate_two_way_surebet,
+    match_and_cross_arbitrage,
+)
 from src.scrapers.sofascore import SofascoreScraper
 
 COLOMBIA_TZ = timezone(timedelta(hours=-5))
@@ -3665,16 +3671,107 @@ def main() -> None:
 
         # TAB 3: ARBITRAJE SEGURO (SUREBETS)
         with tab_sure:
-            st.markdown("#### 🛡️ Oportunidades de Arbitraje Libre de Riesgo (Surebets)")
+            st.markdown("#### 🛡️ Arbitraje Deportivo Libre de Riesgo (Surebets)")
+            st.caption(
+                "El arbitraje puro consiste en aprovechar discrepancias de cuotas entre diferentes casas "
+                "(ej. **Betano vs Betsson**) apostando a todos los desenlaces posibles para asegurar una ganancia fija matemática con 0 riesgo."
+            )
+
+            # --- SECCIÓN A: ESCÁNER MULTI-CASA AUTOMATIZADO (BETANO VS BETSSON) ---
+            st.markdown("##### 📡 Escáner de Cuotas Multi-Casa: Betano vs Betsson (The Odds API)")
+
+            oa_col1, oa_col2, oa_col3 = st.columns([1.5, 1.5, 1.2])
+            with oa_col1:
+                st.markdown("🟢 **Betano:** Mercado Oficial Sofascore")
+            with oa_col2:
+                st.markdown("🟢 **Betsson:** The Odds API v4")
+            with oa_col3:
+                scan_btn = st.button("📡 Escanear Arbitraje en Vivo", use_container_width=True, type="primary")
+
+            if scan_btn or "cross_arbitrage_data" in st.session_state:
+                if scan_btn or "cross_arbitrage_data" not in st.session_state:
+                    with st.spinner("Consultando cuotas en vivo de Betsson vía The Odds API y cruzando con Betano..."):
+                        oa_client = OddsAPIClient()
+                        oa_matches = oa_client.fetch_all_active_soccer_odds(ttl_hours=0.25)
+                        cross_results = match_and_cross_arbitrage(
+                            sofascore_matches=filtered_matches,
+                            odds_api_matches=oa_matches,
+                            bankroll=current_bankroll,
+                        )
+                        st.session_state["cross_arbitrage_data"] = cross_results
+
+                cross_results = st.session_state.get("cross_arbitrage_data", [])
+
+                # Extraer todas las oportunidades de arbitraje detectadas
+                detected_arbs = []
+                for cr in cross_results:
+                    for arb in cr.get("arbitrage_opportunities", []):
+                        if arb.get("is_surebet"):
+                            detected_arbs.append((cr, arb))
+
+                if detected_arbs:
+                    st.success(f"🎉 **¡Se detectaron {len(detected_arbs)} Surebets activas entre Betano y Betsson!**")
+                    for match_info, arb in detected_arbs:
+                        with st.container(border=True):
+                            c_top1, c_top2, c_top3, c_top4 = st.columns([1.8, 1.2, 1.2, 1.2])
+                            with c_top1:
+                                st.markdown(f"**⚽ {match_info['match_title']}**")
+                                st.caption(f"🏆 {match_info['tournament']} | Mercado: `{arb['market']}`")
+                            with c_top2:
+                                st.metric("Inversión Total", f"${arb['total_stake']:,.2f}")
+                            with c_top3:
+                                st.metric("Retorno Seguro", f"${arb['guaranteed_payout']:,.2f}")
+                            with c_top4:
+                                st.metric("Ganancia Neta", f"+${arb['guaranteed_profit']:,.2f}", f"+{arb['roi_pct']:.2f}% ROI")
+
+                            st.markdown("**Desglose de inversión exacta por casa de apuestas:**")
+                            leg_c = st.columns(len(arb["legs"]))
+                            for i_leg, leg in enumerate(arb["legs"]):
+                                with leg_c[i_leg]:
+                                    bm_badge = "🟠 Betano" if "betano" in leg["bookmaker"].lower() else "🔵 Betsson"
+                                    st.markdown(f"**{bm_badge}**")
+                                    st.markdown(f"Selección: **{leg['label']}**")
+                                    st.markdown(f"Cuota: `x{leg['odds']:.2f}`")
+                                    st.markdown(f"Apostar: `💵 ${leg['stake']:,.2f}`")
+                                    st.caption(f"Retorno si gana: ${leg['payout']:,.2f}")
+                else:
+                    st.info(
+                        "ℹ️ **Monitoreo Multi-Casa Activo:** En este momento las cuotas de Betano y Betsson están equilibradas "
+                        "(la suma de inversas actual es superior a 1.0, por lo que ninguna combinación garantiza arbitraje positivo en esta fecha). "
+                        "El sistema continuará verificando en cada actualización."
+                    )
+
+                # Tabla comparativa de cuotas Betano vs Betsson para partidos emparejados
+                if cross_results:
+                    with st.expander("📊 Ver Comparativa Detallada de Cuotas (Betano vs Betsson)", expanded=False):
+                        comp_rows = []
+                        for cr in cross_results:
+                            b_1 = cr["betano_odds"].get("1")
+                            bs_1 = cr["betsson_odds"].get("1")
+                            b_x = cr["betano_odds"].get("X")
+                            bs_x = cr["betsson_odds"].get("X")
+                            b_2 = cr["betano_odds"].get("2")
+                            bs_2 = cr["betsson_odds"].get("2")
+                            b_o = cr["betano_odds"].get("over_2_5")
+                            bs_o = cr["betsson_odds"].get("over_2_5")
+                            b_u = cr["betano_odds"].get("under_2_5")
+                            bs_u = cr["betsson_odds"].get("under_2_5")
+
+                            comp_rows.append({
+                                "Partido": cr["match_title"],
+                                "Torneo": cr["tournament"],
+                                "Betano (1 / X / 2)": f"{b_1 or '-'} / {b_x or '-'} / {b_2 or '-'}",
+                                "Betsson (1 / X / 2)": f"{bs_1 or '-'} / {bs_x or '-'} / {bs_2 or '-'}",
+                                "Betano O/U 2.5": f"O {b_o or '-'} | U {b_u or '-'}",
+                                "Betsson O/U 2.5": f"O {bs_o or '-'} | U {bs_u or '-'}",
+                            })
+                        if comp_rows:
+                            st.dataframe(comp_rows, use_container_width=True)
+
+            # Si se encontraron surebets dentro de la misma jornada por otras vías
             surebets = find_surebets(matches_odds_list, current_bankroll, min_roi=0.015)
-            if not surebets:
-                st.info(
-                    "💡 **¿Por qué no hay Arbitraje Directo (Surebets) en esta casa?**\n\n"
-                    "El **Arbitraje Deportivo (Surebet)** de 0 riesgo matemático únicamente existe cuando se cruzan cuotas entre **dos o más casas de apuestas distintas** con opiniones divergentes (por ejemplo, apostar al Local en Bet365 y al Visitante en Pinnacle).\n\n"
-                    "En una misma casa de apuestas oficial, el corredor cobra una comisión garantizada (*overround* del 105%–108%), por lo que es imposible que exista arbitraje dentro de una sola casa.\n\n"
-                    "👉 **Para obtener ventaja matemática y ganancias reales, utiliza la pestaña 'Inversiones de Valor (+EV con Kelly)'** o **'Coberturas Dutching'**."
-                )
-            else:
+            if surebets:
+                st.markdown("##### 🔍 Otras Surebets Detectadas")
                 for sb in surebets:
                     with st.container(border=True):
                         sb_c1, sb_c2, sb_c3, sb_c4 = st.columns([1.8, 1.2, 1.2, 1.2])
@@ -3688,7 +3785,6 @@ def main() -> None:
                         with sb_c4:
                             st.metric("Ganancia Neta", f"+${sb.guaranteed_profit:.2f}", f"+{sb.roi_pct:.2f}% ROI")
 
-                        # Mostrar desglose de apuestas por rama
                         leg_cols = st.columns(len(sb.legs))
                         for idx_leg, leg in enumerate(sb.legs):
                             with leg_cols[idx_leg]:
@@ -3696,6 +3792,52 @@ def main() -> None:
                                 st.markdown(f"Cuota: `x{leg.odds:.2f}`")
                                 st.markdown(f"Apostar: `💵 ${leg.stake_amount:.2f}`")
                                 st.caption(f"Retorno si gana: ${leg.payout:.2f}")
+
+            st.divider()
+
+            # --- SECCIÓN B: CALCULADORA RÁPIDA DE ARBITRAJE Y DISTRIBUCIÓN DE STAKE ---
+            st.markdown("##### 🧮 Calculadora de Arbitraje y Distribución de Capital")
+            st.caption("Verifica al instante cualquier par de cuotas de Betano y Betsson para conocer si forman una Surebet y la distribución exacta de tu capital.")
+
+            calc_c1, calc_c2, calc_c3 = st.columns([1.2, 1.2, 1.5])
+            with calc_c1:
+                calc_odd_a = st.number_input("Cuota Selección A (ej. Betano)", min_value=1.01, max_value=50.0, value=1.82, step=0.01)
+            with calc_c2:
+                calc_odd_b = st.number_input("Cuota Selección B (ej. Betsson)", min_value=1.01, max_value=50.0, value=2.50, step=0.01)
+            with calc_c3:
+                calc_bank = st.number_input("Capital Total a Invertir ($)", min_value=10.0, max_value=10000000.0, value=float(current_bankroll if current_bankroll > 10 else 20000.0), step=1000.0)
+
+            quick_arb = calculate_two_way_surebet(
+                odd_a=calc_odd_a,
+                odd_b=calc_odd_b,
+                label_a="Selección A",
+                label_b="Selección B",
+                bookmaker_a="Betano",
+                bookmaker_b="Betsson",
+                total_bankroll=calc_bank,
+            )
+
+            if quick_arb:
+                if quick_arb["is_surebet"]:
+                    st.success(
+                        f"🎉 **¡SUREBET CONFIRMADA!** Suma de inversas: `{quick_arb['inverse_sum']:.4f}` < 1.0 "
+                        f"| Rendimiento Neto Garantizado: **+{quick_arb['roi_pct']:.2f}% ROI**"
+                    )
+                    r_c1, r_c2, r_c3 = st.columns(3)
+                    with r_c1:
+                        st.metric("Apostar en Betano", f"${quick_arb['legs'][0]['stake']:,.2f}", f"Cuota {calc_odd_a:.2f}")
+                    with r_c2:
+                        st.metric("Apostar en Betsson", f"${quick_arb['legs'][1]['stake']:,.2f}", f"Cuota {calc_odd_b:.2f}")
+                    with r_c3:
+                        st.metric("Ganancia Neta Garantizada", f"+${quick_arb['guaranteed_profit']:,.2f}", f"Retorno: ${quick_arb['guaranteed_payout']:,.2f}")
+                else:
+                    needed_for_surebet = round(1.0 / (1.0 - (1.0 / calc_odd_a)), 2) if calc_odd_a > 1.0 else 0.0
+                    st.warning(
+                        f"⚠️ **NO ES SUREBET:** La suma de inversas es `{quick_arb['inverse_sum']:.4f}` (> 1.0). "
+                        f"Apostar a ambos lados generaría una pérdida neta del `{abs(quick_arb['roi_pct']):.2f}%` "
+                        f"debido al margen de la casa (vig del {((quick_arb['inverse_sum'] - 1.0) * 100):.1f}%).\n\n"
+                        f"💡 *Para que sea Surebet con Cuota A de {calc_odd_a:.2f}, la Cuota B en Betsson debe ser mayor a **{needed_for_surebet:.2f}**.*"
+                    )
 
         st.divider()
 

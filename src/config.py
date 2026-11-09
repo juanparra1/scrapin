@@ -22,6 +22,10 @@ if DATABASE_URL:
 # Concurrencia para enriquecimiento acelerado en paralelo
 MAX_PARALLEL_WORKERS = int(os.getenv("MAX_PARALLEL_WORKERS", "6"))
 
+# API Externa de Cuotas (The Odds API) para Betsson, Pinnacle, etc.
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "05b314e29b0cbb1f38344df9dc92f76b")
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+
 # Crear directorios necesarios
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
