@@ -34,6 +34,28 @@ from src.scrapers.odds_api_client import (
 from src.scrapers.sofascore import SofascoreScraper
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_portfolio_kpis() -> Dict[str, Any]:
+    return get_portfolio_kpis()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_ledger_history(limit: int = 200) -> List[Dict[str, Any]]:
+    return get_bankroll_ledger_history(limit=limit)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_portfolio_bets(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    return get_portfolio_bets(status=status, limit=limit)
+
+
+def invalidate_portfolio_cache() -> None:
+    """Invalida la caché en memoria del portafolio tras registrar transacciones, apuestas o liquidaciones."""
+    _cached_portfolio_kpis.clear()
+    _cached_ledger_history.clear()
+    _cached_portfolio_bets.clear()
+
+
 def render_portfolio_allocator_view(
     filtered_matches: List[MatchDetailSchema],
     catalog: Dict[str, Any],
@@ -48,7 +70,7 @@ def render_portfolio_allocator_view(
         "optimización de valor esperado (+EV con Kelly Fraccional escalado), coberturas Dutching y auditoría contable determinista."
     )
 
-    kpis = get_portfolio_kpis()
+    kpis = _cached_portfolio_kpis()
     current_bankroll = kpis["current_bankroll"]
 
     # 1. CABECERA DE BANCA Y PARÁMETROS DE RIESGO
@@ -75,6 +97,7 @@ def render_portfolio_allocator_view(
             adj_desc = st.text_input("Nota / Motivo", value="Ajuste manual de banca")
             if st.button("Confirmar Movimiento Contable", use_container_width=True):
                 record_bankroll_transaction(adj_type, adj_amount, adj_desc)
+                invalidate_portfolio_cache()
                 st.success("Transacción registrada en el libro diario.")
                 st.rerun()
 
@@ -467,6 +490,7 @@ def render_portfolio_allocator_view(
                         for b in allocated_value_bets
                     ]
                     saved, skipped = save_portfolio_bets(bets_payload)
+                    invalidate_portfolio_cache()
                     if saved > 0:
                         st.success(f"🎉 **{saved} apuestas guardadas exitosamente** en el portafolio y registradas contablemente en el libro diario.")
                     if skipped > 0:
@@ -716,6 +740,7 @@ def render_portfolio_allocator_view(
 
             with get_db_session() as db_sess:
                 report = audit_and_settle_open_bets(db_sess, local_scores_provider)
+            invalidate_portfolio_cache()
 
             if report.settled_count > 0:
                 st.success(
@@ -739,7 +764,7 @@ def render_portfolio_allocator_view(
                 st.info(f"ℹ️ Se revisaron {report.total_audited} apuestas pendientes. Ningún partido ha concluido aún para liquidación.")
             st.rerun()
 
-    ledger_history = get_bankroll_ledger_history(limit=200)
+    ledger_history = _cached_ledger_history(limit=200)
     if len(ledger_history) >= 2:
         st.markdown("#### 📈 Curva de Crecimiento de la Banca (Libro Diario Contable)")
         df_ledger = pd.DataFrame(ledger_history)
@@ -779,7 +804,7 @@ def render_portfolio_allocator_view(
         }.get(x, x),
     )
 
-    portfolio_records = get_portfolio_bets(status=status_filter, limit=100)
+    portfolio_records = _cached_portfolio_bets(status=status_filter, limit=100)
     if not portfolio_records:
         st.caption("No hay registros en la base de datos para el filtro seleccionado.")
     else:

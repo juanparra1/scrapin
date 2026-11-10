@@ -101,6 +101,18 @@ class AutoLearner:
         }
 
     def _load_or_init_state(self) -> Dict[str, Any]:
+        # 0. Si el archivo local existe y fue actualizado hace menos de 30 min, cargar en 0ms sin consulta remota
+        if self.state_path.exists():
+            try:
+                import time
+                if (time.time() - self.state_path.stat().st_mtime) < 1800:
+                    with open(self.state_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "ensemble_weights" in data and "lines_calibration" in data:
+                            return data
+            except Exception:
+                pass
+
         # 1. Intentar cargar desde Base de Datos persistente (Supabase / Postgres)
         try:
             from src.models.database import load_model_calibration
@@ -349,7 +361,7 @@ class AutoLearner:
         # 4. REENTRENAR EL MODELO GRADIENT BOOSTING CON DATOS RECIENTES DE SQLITE
         from src.analytics.ml_ensemble import get_ml_predictor
         ml_p = get_ml_predictor()
-        ml_p._fit_model()
+        ml_p._fit_model(force=True)
 
         # Guardar en el historial de sesiones
         self.state["total_matches_learned"] += len(audited_pairs)

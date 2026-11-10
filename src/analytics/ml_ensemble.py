@@ -1,8 +1,10 @@
 """Módulo de Machine Learning (Gradient Boosting Classifier) entrenado con SQLite + Prior Calibrado."""
 
+import time
 from typing import Any, Dict, List
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
+from sqlalchemy.orm import load_only
 from src.models.database import MatchRecord, SessionLocal
 
 FEATURE_NAMES = [
@@ -16,6 +18,8 @@ FEATURE_NAMES = [
     "Prob. Implícita Cuota Empate",
     "Prob. Implícita Cuota Visita",
 ]
+
+_CACHED_PRIOR_DATA: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
 
 class MLEnsemblePredictor:
@@ -31,10 +35,16 @@ class MLEnsemblePredictor:
         )
         self.db_matches_count: int = 0
         self.is_trained: bool = False
-        self._fit_model()
+        self._last_trained_ts: float = 0.0
+        self._cached_feature_importances: List[Dict[str, Any]] = []
+        self._fit_model(force=True)
 
     def _generate_calibrated_prior(self, n_samples: int = 450) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Genera muestras base sintéticas calibradas con las leyes empíricas de Poisson/Elo en fútbol."""
+        """Genera muestras base sintéticas calibradas con las leyes empíricas de Poisson/Elo en fútbol (cacheadas en memoria)."""
+        global _CACHED_PRIOR_DATA
+        if _CACHED_PRIOR_DATA is not None and len(_CACHED_PRIOR_DATA[1]) == n_samples:
+            return _CACHED_PRIOR_DATA
+
         rng = np.random.default_rng(42)
         elo_diff = rng.normal(35.0, 115.0, size=n_samples)
         xg_home = np.clip(1.42 + (elo_diff / 340.0) + rng.normal(0, 0.32, size=n_samples), 0.35, 3.8)
@@ -64,9 +74,15 @@ class MLEnsemblePredictor:
             [elo_diff, xg_diff, xg_tot, sot_diff, crn_diff, rest_diff, imp_h, imp_d, imp_a]
         )
         weights = np.ones(n_samples, dtype=float)
-        return X, y, weights
+        _CACHED_PRIOR_DATA = (X, y, weights)
+        return _CACHED_PRIOR_DATA
 
-    def _fit_model(self) -> None:
+    def _fit_model(self, force: bool = False) -> None:
+        # Evitar reentrenamientos redundantes si ya se entrenó hace menos de 30 minutos (1800s)
+        now = time.time()
+        if not force and self.is_trained and (now - self._last_trained_ts) < 1800:
+            return
+
         X_prior, y_prior, w_prior = self._generate_calibrated_prior(450)
         db_rows_X: List[List[float]] = []
         db_rows_y: List[int] = []
@@ -75,11 +91,27 @@ class MLEnsemblePredictor:
         try:
             finished_records = (
                 session.query(MatchRecord)
+                .options(
+                    load_only(
+                        MatchRecord.home_score,
+                        MatchRecord.away_score,
+                        MatchRecord.xg_home,
+                        MatchRecord.xg_away,
+                        MatchRecord.shots_on_target_home,
+                        MatchRecord.shots_on_target_away,
+                        MatchRecord.corners_home,
+                        MatchRecord.corners_away,
+                        MatchRecord.odds_home,
+                        MatchRecord.odds_draw,
+                        MatchRecord.odds_away,
+                    )
+                )
                 .filter(
                     MatchRecord.status_type == "finished",
                     MatchRecord.home_score.isnot(None),
                     MatchRecord.away_score.isnot(None),
                 )
+                .limit(500)
                 .all()
             )
             for r in finished_records:
@@ -131,7 +163,15 @@ class MLEnsemblePredictor:
             X_all, y_all, w_all = X_prior, y_prior, w_prior
 
         self.model.fit(X_all, y_all, sample_weight=w_all)
+        importances = self.model.feature_importances_
+        feat_imp_list = [
+            {"Variable": name, "Importancia (%)": round(float(imp) * 100.0, 1)}
+            for name, imp in zip(FEATURE_NAMES, importances)
+        ]
+        feat_imp_list.sort(key=lambda item: item["Importancia (%)"], reverse=True)
+        self._cached_feature_importances = feat_imp_list
         self.is_trained = True
+        self._last_trained_ts = now
 
     def predict_proba_match(
         self,
@@ -162,20 +202,13 @@ class MLEnsemblePredictor:
             dtype=float,
         )
         probs = self.model.predict_proba(x_vec)[0]
-        importances = self.model.feature_importances_
-
-        feat_imp_list = [
-            {"Variable": name, "Importancia (%)": round(float(imp) * 100.0, 1)}
-            for name, imp in zip(FEATURE_NAMES, importances)
-        ]
-        feat_imp_list.sort(key=lambda item: item["Importancia (%)"], reverse=True)
 
         return {
             "ml_prob_home": round(float(probs[0]) * 100.0, 1),
             "ml_prob_draw": round(float(probs[1]) * 100.0, 1),
             "ml_prob_away": round(float(probs[2]) * 100.0, 1),
             "db_samples_used": self.db_matches_count,
-            "feature_importances": feat_imp_list,
+            "feature_importances": self._cached_feature_importances,
         }
 
 

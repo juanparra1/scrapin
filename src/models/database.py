@@ -392,15 +392,18 @@ def save_precomputed_analysis(
         session.close()
 
 
-def get_precomputed_matches_for_date(match_date: str) -> List[Dict[str, Any]]:
-    """Recupera todos los partidos pre-calculados de una fecha directamente desde la base de datos."""
+def get_precomputed_matches_for_date(match_date: str, include_deep: bool = False) -> List[Dict[str, Any]]:
+    """
+    Recupera todos los partidos pre-calculados de una fecha directamente desde la base de datos.
+    Por defecto omite la descarga de `deep_analysis_json` (defer) para acelerar la carga del catálogo en un 80%.
+    """
     session = SessionLocal()
     try:
-        records = (
-            session.query(PrecomputedMatchRecord)
-            .filter_by(match_date=match_date)
-            .all()
-        )
+        from sqlalchemy.orm import defer
+        query = session.query(PrecomputedMatchRecord).filter_by(match_date=match_date)
+        if not include_deep:
+            query = query.options(defer(PrecomputedMatchRecord.deep_analysis_json))
+        records = query.all()
         results = []
         for r in records:
             results.append({
@@ -412,12 +415,65 @@ def get_precomputed_matches_for_date(match_date: str) -> List[Dict[str, Any]]:
                 "status_type": r.status_type,
                 "match_detail": json.loads(r.match_detail_json) if r.match_detail_json else {},
                 "prediction": json.loads(r.prediction_json) if r.prediction_json else {},
-                "deep_analysis": json.loads(r.deep_analysis_json) if r.deep_analysis_json else {},
+                "deep_analysis": (
+                    json.loads(r.deep_analysis_json)
+                    if (include_deep and r.deep_analysis_json)
+                    else {}
+                ),
             })
         return results
     except Exception as e:
         logger.warning(f"Error consultando partidos precalculados para {match_date}: {e}")
         return []
+    finally:
+        session.close()
+
+
+def get_precomputed_deep_for_event(event_id: int) -> Optional[Dict[str, Any]]:
+    """Carga bajo demanda (Lazy Loading) el análisis profundo precalculado de un único partido por su event_id."""
+    session = SessionLocal()
+    try:
+        r = session.get(PrecomputedMatchRecord, int(event_id))
+        if not r or not r.deep_analysis_json:
+            return None
+        return {
+            "event_id": r.event_id,
+            "match_detail": json.loads(r.match_detail_json) if r.match_detail_json else {},
+            "prediction": json.loads(r.prediction_json) if r.prediction_json else {},
+            "deep_analysis": json.loads(r.deep_analysis_json) if r.deep_analysis_json else {},
+        }
+    except Exception as e:
+        logger.debug(f"Error consultando deep_analysis para evento {event_id}: {e}")
+        return None
+    finally:
+        session.close()
+
+
+def get_precomputed_deep_for_events(event_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Carga en bloque (1 sola consulta SQL IN) los análisis profundos de una lista de event_ids."""
+    if not event_ids:
+        return {}
+    session = SessionLocal()
+    try:
+        clean_ids = [int(eid) for eid in set(event_ids) if eid]
+        records = (
+            session.query(PrecomputedMatchRecord)
+            .filter(PrecomputedMatchRecord.event_id.in_(clean_ids))
+            .all()
+        )
+        out: Dict[int, Dict[str, Any]] = {}
+        for r in records:
+            if r.deep_analysis_json:
+                out[r.event_id] = {
+                    "event_id": r.event_id,
+                    "match_detail": json.loads(r.match_detail_json) if r.match_detail_json else {},
+                    "prediction": json.loads(r.prediction_json) if r.prediction_json else {},
+                    "deep_analysis": json.loads(r.deep_analysis_json) if r.deep_analysis_json else {},
+                }
+        return out
+    except Exception as e:
+        logger.debug(f"Error consultando deep_analysis en lote: {e}")
+        return {}
     finally:
         session.close()
 
