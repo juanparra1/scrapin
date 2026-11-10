@@ -75,6 +75,7 @@ TOP_TOURNAMENTS = {
 
     # --- 3. TORNEOS INTERNACIONALES DE CLUBES ---
     7: {"name": "UEFA Champions League", "country": "Europe"},
+    692: {"name": "UEFA Women's Champions League", "country": "Europe"},
     679: {"name": "UEFA Europa League", "country": "Europe"},
     17015: {"name": "UEFA Conference League", "country": "Europe"},
     465: {"name": "UEFA Super Cup", "country": "Europe"},
@@ -102,6 +103,8 @@ TOP_TOURNAMENTS = {
 
 # Torneos clave para rescate rápido (sin disparar tormenta de 50 peticiones)
 PRIORITY_FALLBACK_TOURNAMENTS = [
+    692,    # UEFA Women's Champions League
+    7,      # UEFA Champions League
     10783,  # UEFA Nations League
     14100,  # CONCACAF Nations League
     851,    # International Friendly Games
@@ -111,6 +114,50 @@ PRIORITY_FALLBACK_TOURNAMENTS = [
     155,    # Liga Profesional Argentina
     325,    # Brasileirão Série A
 ]
+
+# Mapeo de unique_tournament_id (Sofascore) -> slug de liga en ESPN Public API (fallback 100% libre de bloqueos 403)
+TOURNAMENT_ESPN_SLUGS = {
+    692: "uefa.wchampions",
+    7: "uefa.champions",
+    679: "uefa.europa",
+    17015: "uefa.europa.conf",
+    10783: "uefa.nations",
+    14100: "concacaf.nations.league",
+    851: "fifa.friendly",
+    1077: "fifa.friendly",
+    17: "eng.1",
+    18: "eng.2",
+    19: "eng.fa",
+    21: "eng.league_cup",
+    8: "esp.1",
+    329: "esp.copa_del_rey",
+    23: "ita.1",
+    328: "ita.coppa_italia",
+    35: "ger.1",
+    217: "ger.dfb_pokal",
+    34: "fra.1",
+    335: "fra.coupe_de_france",
+    11539: "col.1",
+    11542: "col.1",
+    1335: "col.copa",
+    242: "usa.1",
+    155: "arg.1",
+    1024: "arg.copa",
+    955: "ksa.1",
+    52: "tur.1",
+    325: "bra.1",
+    373: "bra.copa_do_brazil",
+    238: "por.1",
+    11621: "mex.1",
+    384: "conmebol.libertadores",
+    480: "conmebol.sudamericana",
+    377: "fifa.worldq.conmebol",
+    110: "fifa.worldq.uefa",
+    120: "fifa.worldq.concacaf",
+    1: "uefa.euro",
+    133: "conmebol.america",
+    130: "concacaf.gold",
+}
 
 # Configuración de peticiones y Rate Limiting
 SOFASCORE_API_BASE = "https://www.sofascore.com/api/v1"

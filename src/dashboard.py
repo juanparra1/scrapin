@@ -221,6 +221,15 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
                 except Exception:
                     pass
         if matches_cached:
+            if not any((m.tournament.unique_id or m.tournament.id) == 692 for m in matches_cached):
+                try:
+                    uwcl_matches = sf_scraper._fetch_espn_scheduled_events(date_str, 692)
+                    seen_eids = {m.event_id for m in matches_cached}
+                    for um in uwcl_matches:
+                        if um.event_id not in seen_eids:
+                            matches_cached.append(um)
+                except Exception:
+                    pass
             matches_cached.sort(key=lambda m: m.start_timestamp)
             return {
                 "matches": matches_cached,
@@ -394,6 +403,77 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
     }
 
 
+def _ensure_players_populated(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Si un partido precalculado en Supabase tiene home_players o away_players vacíos,
+    extrae las estadísticas individuales de temporada (Sofascore / Caché / ESPN Roster),
+    recalcula las probabilidades de jugadores y actualiza el caché en memoria.
+    """
+    if entry.get("home_players") and entry.get("away_players"):
+        return entry
+    try:
+        sf_scraper, _ = get_scrapers()
+        match: MatchDetailSchema = entry["match"]
+        home_form: TeamFormMetrics = entry["home_form"]
+        away_form: TeamFormMetrics = entry["away_form"]
+        ut_id = match.tournament.unique_id or match.tournament.id or 0
+        s_id = match.season_id or 0
+        home_missing = match.home_lineup.missing_players if match.home_lineup else []
+        away_missing = match.away_lineup.missing_players if match.away_lineup else []
+
+        h_players = entry.get("home_players") or []
+        a_players = entry.get("away_players") or []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_exec:
+            fut_h = (
+                inner_exec.submit(
+                    sf_scraper.get_team_top_players,
+                    match.home_team.id,
+                    match.home_team.name,
+                    ut_id,
+                    s_id,
+                    home_missing,
+                    match.home_lineup,
+                    away_form.shots_on_target_against_avg,
+                )
+                if not h_players
+                else None
+            )
+            fut_a = (
+                inner_exec.submit(
+                    sf_scraper.get_team_top_players,
+                    match.away_team.id,
+                    match.away_team.name,
+                    ut_id,
+                    s_id,
+                    away_missing,
+                    match.away_lineup,
+                    home_form.shots_on_target_against_avg,
+                )
+                if not a_players
+                else None
+            )
+            if fut_h:
+                h_players = fut_h.result()
+            if fut_a:
+                a_players = fut_a.result()
+
+        if h_players or a_players:
+            entry["home_players"] = h_players
+            entry["away_players"] = a_players
+            entry["prediction"] = predict_match_poisson(
+                match,
+                home_form,
+                away_form,
+                home_players=h_players,
+                away_players=a_players,
+            )
+            _PRECOMPUTED_DEEP_MEMORY_CACHE[match.event_id] = entry
+    except Exception as exc:
+        logger.debug("Error poblando jugadores bajo demanda: %s", exc)
+    return entry
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[str, Any]:
     """
@@ -408,13 +488,13 @@ def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[st
         if eid_lookup in _PRECOMPUTED_DEEP_MEMORY_CACHE:
             cached_entry = _PRECOMPUTED_DEEP_MEMORY_CACHE[eid_lookup]
             if cached_entry.get("prediction") is not None and cached_entry.get("home_form") is not None:
-                return cached_entry
+                return _ensure_players_populated(cached_entry)
         # Carga Perezosa (Lazy Load) desde Supabase por primary key (< 15ms)
         db_rec = get_precomputed_deep_for_event(int(eid_lookup))
         if db_rec:
             decoded_entry = _decode_and_cache_deep_record(db_rec)
             if decoded_entry and decoded_entry.get("prediction") is not None:
-                return decoded_entry
+                return _ensure_players_populated(decoded_entry)
 
     sf_scraper, _ = get_scrapers()
     match = MatchDetailSchema.model_validate(match_dict)

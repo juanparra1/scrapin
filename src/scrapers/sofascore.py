@@ -1,10 +1,19 @@
 """Extractor de datos de Sofascore + Opta (partidos del día, xG, xGOT, porteros, cuotas, alineaciones, H2H profundo e historial)."""
 
 import concurrent.futures
+import json
 import math
+import unicodedata
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-from src.config import PRIORITY_FALLBACK_TOURNAMENTS, SOFASCORE_API_BASE, TOP_TOURNAMENTS
+from src.config import (
+    CACHE_DIR,
+    PRIORITY_FALLBACK_TOURNAMENTS,
+    SOFASCORE_API_BASE,
+    TOP_TOURNAMENTS,
+    TOURNAMENT_ESPN_SLUGS,
+)
 from src.models.schemas import (
     H2HMatchItemSchema,
     H2HSummarySchema,
@@ -49,8 +58,37 @@ def _parse_stat_number(val: Any) -> Optional[float]:
         return None
 
 
+def _normalize_team_label(name: str) -> str:
+    """Normaliza nombres de equipos (sin tildes ni sufijos genéricos) para cruce exacto entre Sofascore y ESPN."""
+    if not name:
+        return ""
+    norm = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+    for token in ("fc", "cf", "sc", "ac", "ud", "cd", "bk", "fk", "sk", "if", "women", "femenino", "wfc"):
+        norm = norm.replace(f" {token} ", " ").replace(f" {token}", "").replace(f"{token} ", "")
+    norm = " ".join(norm.split()).strip()
+    aliases = {
+        "internazionale": "inter",
+        "inter milan": "inter",
+        "paris saint-germain": "psg",
+        "paris saint germain": "psg",
+        "ol lyonnes": "lyon",
+        "olympique lyonnais": "lyon",
+        "turkiye": "turkey",
+        "czechia": "czech republic",
+        "bosnia & herzegovina": "bosnia and herzegovina",
+        "atletico madrid": "atletico",
+        "club atletico de madrid": "atletico",
+        "bayern munchen": "bayern munich",
+    }
+    return aliases.get(norm, norm)
+
+
 class SofascoreScraper(BaseScraperClient):
-    """Cliente especializado para extraer datos estructurados de Sofascore / Opta."""
+    """Cliente especializado para extraer datos estructurados de Sofascore / Opta con respaldo automático ESPN."""
+
+    _top_players_cache_indexed: bool = False
+    _team_top_players_files: Dict[int, Path] = {}
+    _espn_team_meta: Dict[int, tuple[str, str]] = {}
 
     def get_scheduled_events(
         self,
@@ -63,18 +101,15 @@ class SofascoreScraper(BaseScraperClient):
         y soporte multi-huso horario para partidos nocturnos de América y Selecciones (Nations League).
         """
         if self.is_sofascore_blocked():
-            return []
-
-        cat_url = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/-18000/categories"
-        cat_payload = self.get_json(cat_url, ttl_hours=0.5)
-        if self.is_sofascore_blocked():
-            return []
-
-        if not cat_payload or "categories" not in cat_payload or not cat_payload["categories"]:
-            cat_url_utc0 = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/0/categories"
-            cat_payload = self.get_json(cat_url_utc0, ttl_hours=0.5)
-            if self.is_sofascore_blocked():
-                return []
+            cat_payload = None
+        else:
+            cat_url = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/-18000/categories"
+            cat_payload = self.get_json(cat_url, ttl_hours=0.5)
+            if not self.is_sofascore_blocked() and (
+                not cat_payload or "categories" not in cat_payload or not cat_payload["categories"]
+            ):
+                cat_url_utc0 = f"{SOFASCORE_API_BASE}/sport/football/{date_str}/0/categories"
+                cat_payload = self.get_json(cat_url_utc0, ttl_hours=0.5)
 
         matches: List[MatchDetailSchema] = []
         seen_event_ids: set[int] = set()
@@ -100,11 +135,10 @@ class SofascoreScraper(BaseScraperClient):
                     if ut_id in TOP_TOURNAMENTS and ut_id not in active_top_tournaments:
                         active_top_tournaments.append(int(ut_id))
 
-        # Si hay pocos torneos detectados y Sofascore NO está bloqueado, verificar solo los 8 torneos prioritarios (Nations League, Colombia, etc.)
-        if len(active_top_tournaments) < 3 and not self.is_sofascore_blocked():
-            for p_id in PRIORITY_FALLBACK_TOURNAMENTS:
-                if p_id not in active_top_tournaments:
-                    active_top_tournaments.append(p_id)
+        # Asegurar siempre los torneos prioritarios (incluyendo UEFA Women's Champions League 692 y Nations League 10783)
+        for p_id in PRIORITY_FALLBACK_TOURNAMENTS:
+            if p_id not in active_top_tournaments:
+                active_top_tournaments.append(p_id)
 
         tz_local = timezone(timedelta(hours=-5))
         try:
@@ -112,10 +146,10 @@ class SofascoreScraper(BaseScraperClient):
         except Exception:
             next_date_str = date_str
 
-        # Torneos de América/Selecciones cuyos partidos nocturnos (19:00-23:59 COL) caen en el día siguiente UTC en Sofascore
+        # Torneos cuyos partidos vespertinos/nocturnos pueden cruzar medianoche UTC
         americas_and_intl_ids = {
-            11539, 11542, 1335, 10825, 155, 1024, 11707, 325, 373, 242, 11621,
-            384, 480, 490, 377, 120, 133, 14100, 130, 10783, 1077, 851
+            692, 7, 679, 17015, 11539, 11542, 1335, 10825, 155, 1024, 11707, 325, 373,
+            242, 11621, 384, 480, 490, 377, 120, 133, 14100, 130, 10783, 1077, 851
         }
 
         def _fetch_tourney(ut_id: int) -> List[Dict[str, Any]]:
@@ -133,16 +167,35 @@ class SofascoreScraper(BaseScraperClient):
                     events_out.extend(t_data_next["events"])
             return events_out
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as exec_t:
-            results = exec_t.map(_fetch_tourney, active_top_tournaments)
-            for raw_list in results:
-                for raw in raw_list:
-                    match_schema = self._parse_event_summary(raw)
-                    if match_schema and match_schema.event_id not in seen_event_ids:
-                        event_date_local = datetime.fromtimestamp(match_schema.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
-                        if event_date_local == date_str:
-                            seen_event_ids.add(match_schema.event_id)
-                            matches.append(match_schema)
+        found_ut_ids: set[int] = set()
+        if not self.is_sofascore_blocked():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as exec_t:
+                results = exec_t.map(_fetch_tourney, active_top_tournaments)
+                for raw_list in results:
+                    for raw in raw_list:
+                        match_schema = self._parse_event_summary(raw)
+                        if match_schema and match_schema.event_id not in seen_event_ids:
+                            event_date_local = datetime.fromtimestamp(match_schema.start_timestamp, tz=tz_local).strftime("%Y-%m-%d")
+                            if event_date_local == date_str:
+                                seen_event_ids.add(match_schema.event_id)
+                                if match_schema.tournament.unique_id:
+                                    found_ut_ids.add(match_schema.tournament.unique_id)
+                                matches.append(match_schema)
+
+        # Respaldo automático con ESPN API para UEFA Women's Champions League (692) y torneos prioritarios si Sofascore no devolvió eventos
+        espn_check_ids = [p_id for p_id in PRIORITY_FALLBACK_TOURNAMENTS if p_id not in found_ut_ids]
+        if espn_check_ids:
+            seen_pair_keys = {
+                (_normalize_team_label(m.home_team.name), _normalize_team_label(m.away_team.name))
+                for m in matches
+            }
+            for ut_id in espn_check_ids:
+                for em in self._fetch_espn_scheduled_events(date_str, ut_id):
+                    pair_key = (_normalize_team_label(em.home_team.name), _normalize_team_label(em.away_team.name))
+                    if em.event_id not in seen_event_ids and pair_key not in seen_pair_keys:
+                        seen_event_ids.add(em.event_id)
+                        seen_pair_keys.add(pair_key)
+                        matches.append(em)
 
         if not only_top_tournaments and not self.is_sofascore_blocked():
             for cat_id in active_categories[:12]:
@@ -987,6 +1040,199 @@ class SofascoreScraper(BaseScraperClient):
 
         return result if result else None
 
+    def _fetch_espn_scheduled_events(self, date_str: str, ut_id: int) -> List[MatchDetailSchema]:
+        """Obtiene partidos programados desde ESPN Public API (ej. UEFA Women's Champions League 692, Nations League 10783) sin bloqueo 403."""
+        espn_slug = TOURNAMENT_ESPN_SLUGS.get(ut_id)
+        if not espn_slug:
+            return []
+        ymd = date_str.replace("-", "")
+        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{espn_slug}/scoreboard?dates={ymd}"
+        data = self.get_json(url, ttl_hours=1.0)
+        if not data or "events" not in data:
+            return []
+
+        t_meta = TOP_TOURNAMENTS.get(ut_id, {"name": "Torneo Internacional", "country": "World"})
+        tz_local = timezone(timedelta(hours=-5))
+        results: List[MatchDetailSchema] = []
+
+        for ev in data.get("events", []):
+            try:
+                ev_id = int(ev.get("id", 0))
+                if not ev_id:
+                    continue
+                iso_date = ev.get("date", "")
+                dt_utc = datetime.fromisoformat(iso_date.replace("Z", "+00:00"))
+                if dt_utc.astimezone(tz_local).strftime("%Y-%m-%d") != date_str:
+                    continue
+
+                comp = (ev.get("competitions") or [{}])[0]
+                competitors = comp.get("competitors", [])
+                home_c = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                away_c = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                if not home_c or not away_c:
+                    continue
+
+                ht = home_c.get("team", {})
+                at = away_c.get("team", {})
+                h_id = int(ht.get("id", 0))
+                a_id = int(at.get("id", 0))
+                SofascoreScraper._espn_team_meta[h_id] = (espn_slug, str(h_id))
+                SofascoreScraper._espn_team_meta[a_id] = (espn_slug, str(a_id))
+
+                st_state = comp.get("status", {}).get("type", {}).get("state", "pre")
+                st_type = "finished" if st_state == "post" else ("inprogress" if st_state == "in" else "notstarted")
+
+                hs_val = home_c.get("score")
+                as_val = away_c.get("score")
+                h_score = int(float(hs_val)) if (st_type != "notstarted" and hs_val is not None and str(hs_val).replace(".", "").isdigit()) else None
+                a_score = int(float(as_val)) if (st_type != "notstarted" and as_val is not None and str(as_val).replace(".", "").isdigit()) else None
+
+                results.append(
+                    MatchDetailSchema(
+                        event_id=ev_id,
+                        custom_id=f"espn_{ev_id}",
+                        slug=ev.get("shortName", f"match-{ev_id}").lower().replace(" ", "-"),
+                        start_timestamp=int(dt_utc.timestamp()),
+                        start_time_utc=dt_utc,
+                        status_type=st_type,
+                        status_description=comp.get("status", {}).get("type", {}).get("shortDetail"),
+                        tournament=TournamentSchema(
+                            id=ut_id,
+                            unique_id=ut_id,
+                            name=t_meta["name"],
+                            country=t_meta["country"],
+                        ),
+                        season_id=int(ev.get("season", {}).get("year", 2026)),
+                        home_team=TeamSchema(
+                            id=h_id,
+                            name=ht.get("displayName") or ht.get("name", "Home"),
+                            short_name=ht.get("shortDisplayName") or ht.get("name"),
+                        ),
+                        away_team=TeamSchema(
+                            id=a_id,
+                            name=at.get("displayName") or at.get("name", "Away"),
+                            short_name=at.get("shortDisplayName") or at.get("name"),
+                        ),
+                        home_score=h_score,
+                        away_score=a_score,
+                    )
+                )
+            except Exception:
+                continue
+        return results
+
+    def _fetch_espn_team_recent_matches(
+        self,
+        team_id: int,
+        limit: int = 8,
+        with_stats: bool = True,
+        max_stat_matches: int = 5,
+    ) -> List[MatchDetailSchema]:
+        """Recupera los últimos partidos jugados y sus estadísticas Opta desde ESPN Public API."""
+        meta = SofascoreScraper._espn_team_meta.get(team_id)
+        slugs_to_try = [meta[0]] if meta else ["uefa.wchampions", "uefa.nations", "uefa.champions"]
+        espn_tid = meta[1] if meta else str(team_id)
+
+        raw_events: List[Dict[str, Any]] = []
+        used_slug = slugs_to_try[0]
+        for slug in slugs_to_try:
+            s_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/teams/{espn_tid}/schedule"
+            s_data = self.get_json(s_url, ttl_hours=6.0)
+            if s_data and s_data.get("events"):
+                raw_events = s_data["events"]
+                used_slug = slug
+                break
+
+        if not raw_events:
+            return []
+
+        finished = []
+        for e in raw_events:
+            comp = (e.get("competitions") or [{}])[0]
+            if comp.get("status", {}).get("type", {}).get("state") == "post":
+                finished.append(e)
+
+        finished.sort(key=lambda x: x.get("date", ""), reverse=True)
+        results: List[MatchDetailSchema] = []
+
+        for idx, ev in enumerate(finished[:limit]):
+            try:
+                ev_id = int(ev.get("id", 0))
+                dt_utc = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00"))
+                comp = (ev.get("competitions") or [{}])[0]
+                comps = comp.get("competitors", [])
+                hc = next((c for c in comps if c.get("homeAway") == "home"), None)
+                ac = next((c for c in comps if c.get("homeAway") == "away"), None)
+                if not hc or not ac:
+                    continue
+
+                def _extract_score(c_obj: Dict[str, Any]) -> int:
+                    sc = c_obj.get("score")
+                    if isinstance(sc, dict):
+                        return int(float(sc.get("value", 0)))
+                    return int(float(sc or 0))
+
+                hs = _extract_score(hc)
+                as_ = _extract_score(ac)
+                ht = hc.get("team", {})
+                at = ac.get("team", {})
+
+                m_obj = MatchDetailSchema(
+                    event_id=ev_id,
+                    slug=f"espn-{ev_id}",
+                    start_timestamp=int(dt_utc.timestamp()),
+                    start_time_utc=dt_utc,
+                    status_type="finished",
+                    tournament=TournamentSchema(
+                        id=692 if used_slug == "uefa.wchampions" else 10783,
+                        unique_id=692 if used_slug == "uefa.wchampions" else 10783,
+                        name=ev.get("season", {}).get("displayName", "Torneo"),
+                    ),
+                    home_team=TeamSchema(id=int(ht.get("id", 0)), name=ht.get("displayName", "Home")),
+                    away_team=TeamSchema(id=int(at.get("id", 0)), name=at.get("displayName", "Away")),
+                    home_score=hs,
+                    away_score=as_,
+                )
+
+                if with_stats and idx < max_stat_matches:
+                    sum_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{used_slug}/summary?event={ev_id}"
+                    sum_data = self.get_json(sum_url, ttl_hours=24.0)
+                    b_teams = (sum_data or {}).get("boxscore", {}).get("teams", [])
+                    if len(b_teams) == 2:
+                        h_tid_str = str(ht.get("id"))
+                        bt_h = next((bt for bt in b_teams if str(bt.get("team", {}).get("id")) == h_tid_str), b_teams[0])
+                        bt_a = next((bt for bt in b_teams if bt is not bt_h), b_teams[1])
+                        sh_map = {s.get("name"): _parse_stat_number(s.get("displayValue")) for s in bt_h.get("statistics", [])}
+                        sa_map = {s.get("name"): _parse_stat_number(s.get("displayValue")) for s in bt_a.get("statistics", [])}
+                        sot_h = int(sh_map.get("shotsOnTarget") or 0)
+                        sot_a = int(sa_map.get("shotsOnTarget") or 0)
+                        ts_h = int(sh_map.get("totalShots") or max(sot_h, 0))
+                        ts_a = int(sa_map.get("totalShots") or max(sot_a, 0))
+                        m_obj.stats = MatchStatsSchema(
+                            ball_possession_home=sh_map.get("possessionPct"),
+                            ball_possession_away=sa_map.get("possessionPct"),
+                            total_shots_home=ts_h,
+                            total_shots_away=ts_a,
+                            shots_on_target_home=sot_h,
+                            shots_on_target_away=sot_a,
+                            corner_kicks_home=int(sh_map.get("wonCorners") or 0),
+                            corner_kicks_away=int(sa_map.get("wonCorners") or 0),
+                            fouls_home=int(sh_map.get("foulsCommitted") or 0),
+                            fouls_away=int(sa_map.get("foulsCommitted") or 0),
+                            yellow_cards_home=int(sh_map.get("yellowCards") or 0),
+                            yellow_cards_away=int(sa_map.get("yellowCards") or 0),
+                            red_cards_home=int(sh_map.get("redCards") or 0),
+                            red_cards_away=int(sa_map.get("redCards") or 0),
+                            saves_home=int(sh_map.get("saves") or max(0, sot_a - as_)),
+                            saves_away=int(sa_map.get("saves") or max(0, sot_h - hs)),
+                            expected_goals_home=round((sot_h * 0.31) + (max(0, ts_h - sot_h) * 0.05), 2),
+                            expected_goals_away=round((sot_a * 0.31) + (max(0, ts_a - sot_a) * 0.05), 2),
+                        )
+                results.append(m_obj)
+            except Exception:
+                continue
+        return results
+
     def get_team_recent_matches(
         self,
         team_id: int,
@@ -998,10 +1244,15 @@ class SofascoreScraper(BaseScraperClient):
         Obtiene los últimos N partidos finalizados de un equipo y opcionalmente
         enriquece los más recientes con sus estadísticas Opta reales (xG, xGOT, córners, tiros, atajadas).
         """
+        if team_id in SofascoreScraper._espn_team_meta:
+            espn_rec = self._fetch_espn_team_recent_matches(team_id, limit, with_stats, max_stat_matches)
+            if espn_rec:
+                return espn_rec
+
         url = f"{SOFASCORE_API_BASE}/team/{team_id}/events/last/0"
         data = self.get_json(url, ttl_hours=6.0)
         if not data or "events" not in data:
-            return []
+            return self._fetch_espn_team_recent_matches(team_id, limit, with_stats, max_stat_matches)
 
         finished_events = [
             e
@@ -1055,6 +1306,204 @@ class SofascoreScraper(BaseScraperClient):
                 }
         return table_map
 
+    @classmethod
+    def _get_cached_top_players_for_team(cls, team_id: int) -> Optional[Dict[str, Any]]:
+        """Índice perezoso de archivos `topPlayers` en `data/cache` para recuperar líderes por team_id en < 1ms."""
+        if not cls._top_players_cache_indexed:
+            cls._top_players_cache_indexed = True
+            try:
+                for cf in CACHE_DIR.glob("*.json"):
+                    try:
+                        txt = cf.read_text(encoding="utf-8", errors="ignore")
+                        if '"topPlayers"' not in txt:
+                            continue
+                        d = json.loads(txt)
+                        tp_obj = d.get("topPlayers", {})
+                        for cat_list in tp_obj.values():
+                            if isinstance(cat_list, list) and cat_list:
+                                tid = cat_list[0].get("team", {}).get("id")
+                                if tid:
+                                    cls._team_top_players_files[int(tid)] = cf
+                                    break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        cf_match = cls._team_top_players_files.get(int(team_id))
+        if cf_match and cf_match.exists():
+            try:
+                return json.loads(cf_match.read_text(encoding="utf-8")).get("topPlayers", {})
+            except Exception:
+                return None
+        return None
+
+    def _populate_players_from_espn_roster(
+        self,
+        team_id: int,
+        team_name: str,
+        unique_tournament_id: int,
+        players_map: Dict[int, PlayerPropSchema],
+        missing_set: set[str],
+        starter_ids: set[int],
+        sub_ids: set[int],
+    ) -> None:
+        """
+        Respaldo 100% Cloud-Safe vía ESPN Public API (`/teams/{id}/roster`) cuando Sofascore no tiene
+        `top-players/overall` para la temporada actual o aplica bloqueo 403.
+        Extrae partidos jugados, remates totales, remates al arco, goles, asistencias y tarjetas de la temporada.
+        """
+        candidate_slugs: List[str] = []
+        meta = SofascoreScraper._espn_team_meta.get(team_id)
+        if meta and meta[0] not in candidate_slugs:
+            candidate_slugs.append(meta[0])
+        primary_slug = TOURNAMENT_ESPN_SLUGS.get(unique_tournament_id)
+        if primary_slug and primary_slug not in candidate_slugs:
+            candidate_slugs.append(primary_slug)
+        for fallback_slug in (
+            "uefa.nations",
+            "uefa.wchampions",
+            "uefa.champions",
+            "uefa.europa",
+            "eng.1",
+            "esp.1",
+            "ita.1",
+            "ger.1",
+            "fra.1",
+            "col.1",
+            "arg.1",
+            "bra.1",
+            "por.1",
+            "tur.1",
+            "concacaf.nations.league",
+            "fifa.friendly",
+        ):
+            if fallback_slug not in candidate_slugs:
+                candidate_slugs.append(fallback_slug)
+
+        target_norm = _normalize_team_label(team_name)
+        espn_tid: Optional[str] = meta[1] if meta else None
+        matched_slug: Optional[str] = meta[0] if meta else None
+
+        if not espn_tid:
+            for slug in candidate_slugs[:6]:
+                t_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/teams?limit=120"
+                t_data = self.get_json(t_url, ttl_hours=24.0)
+                if not t_data:
+                    continue
+                teams_list = [
+                    t.get("team", {})
+                    for s in t_data.get("sports", [])
+                    for l in s.get("leagues", [])
+                    for t in l.get("teams", [])
+                ]
+                for t_obj in teams_list:
+                    cand_names = [
+                        t_obj.get("displayName", ""),
+                        t_obj.get("name", ""),
+                        t_obj.get("shortDisplayName", ""),
+                        t_obj.get("location", ""),
+                    ]
+                    norms = {_normalize_team_label(cn) for cn in cand_names if cn}
+                    if target_norm in norms or any(
+                        target_norm and cn_norm and (target_norm in cn_norm or cn_norm in target_norm)
+                        for cn_norm in norms
+                    ):
+                        espn_tid = str(t_obj.get("id"))
+                        matched_slug = slug
+                        SofascoreScraper._espn_team_meta[team_id] = (slug, espn_tid)
+                        break
+                if espn_tid:
+                    break
+
+        if not espn_tid or not matched_slug:
+            return
+
+        r_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{matched_slug}/teams/{espn_tid}/roster"
+        r_data = self.get_json(r_url, ttl_hours=12.0)
+        athletes = (r_data or {}).get("athletes", [])
+        if not athletes:
+            return
+
+        fallback_attackers: List[tuple[int, str, str, int]] = []
+        for a in athletes:
+            try:
+                pid = int(a.get("id", 0))
+                if not pid:
+                    continue
+                pname = a.get("displayName") or a.get("fullName") or "Jugador"
+                pos_abbr = (a.get("position") or {}).get("abbreviation") or "M"
+                if pos_abbr == "G":
+                    continue
+
+                cats = a.get("statistics", {}).get("splits", {}).get("categories", [])
+                s_map: Dict[str, float] = {}
+                for c in cats:
+                    for st_item in c.get("stats", []):
+                        val = st_item.get("value")
+                        if isinstance(val, (int, float)):
+                            s_map[st_item.get("name", "")] = float(val)
+
+                apps = int(s_map.get("appearances") or 0)
+                shots = int(s_map.get("totalShots") or 0)
+                sot = int(s_map.get("shotsOnTarget") or 0)
+                goals = int(s_map.get("totalGoals") or 0)
+                assists = int(s_map.get("goalAssists") or 0)
+                yc = int(s_map.get("yellowCards") or 0)
+
+                if pos_abbr in ("F", "M"):
+                    fallback_attackers.append((pid, pname, pos_abbr, max(1, apps)))
+
+                if shots <= 0 and sot <= 0 and goals <= 0:
+                    continue
+
+                eff_apps = max(1, apps)
+                eff_shots = max(shots, sot, goals)
+                eff_sot = max(sot, goals)
+                est_xg = round((eff_sot * 0.30) + (max(0, eff_shots - eff_sot) * 0.06) + (goals * 0.20), 2)
+                is_st = True if pid in starter_ids else (False if pid in sub_ids else None)
+
+                players_map[pid] = PlayerPropSchema(
+                    player_id=pid,
+                    name=pname,
+                    position=pos_abbr,
+                    team_name=team_name,
+                    appearances=eff_apps,
+                    goals=goals,
+                    expected_goals=est_xg,
+                    shots_on_target=eff_sot,
+                    total_shots=eff_shots,
+                    yellow_cards=yc,
+                    key_passes_per_match=round((assists * 1.8) / eff_apps, 2) if assists > 0 else 0.0,
+                    is_missing=pname.lower() in missing_set,
+                    is_starter=is_st,
+                )
+            except Exception:
+                continue
+
+        # Si el torneo está en Jornada 1 y ningún jugador acumula tiros aún, proyectar delanteros/mediocampistas ofensivos del plantel
+        if not players_map and fallback_attackers:
+            fallback_attackers.sort(key=lambda x: (x[2] == "F", x[3]), reverse=True)
+            for pid, pname, pos_abbr, eff_apps in fallback_attackers[:8]:
+                base_sot = 1.15 if pos_abbr == "F" else 0.65
+                base_shots = 2.60 if pos_abbr == "F" else 1.55
+                base_xg = 0.34 if pos_abbr == "F" else 0.16
+                players_map[pid] = PlayerPropSchema(
+                    player_id=pid,
+                    name=pname,
+                    position=pos_abbr,
+                    team_name=team_name,
+                    appearances=eff_apps,
+                    shots_on_target=max(1, int(round(base_sot * eff_apps))),
+                    total_shots=max(2, int(round(base_shots * eff_apps))),
+                    expected_goals=round(base_xg * eff_apps, 2),
+                    sot_per_match=base_sot,
+                    shots_per_match=base_shots,
+                    xg_per_match=base_xg,
+                    is_missing=pname.lower() in missing_set,
+                    is_starter=True if pid in starter_ids else None,
+                )
+
     def get_team_top_players(
         self,
         team_id: int,
@@ -1069,6 +1518,7 @@ class SofascoreScraper(BaseScraperClient):
         Obtiene los líderes estadísticos de un equipo en la temporada actual (Opta),
         los cruza con la alineación del partido (Titular vs Suplente y seasonRatingBreakdown)
         y ajusta sus probabilidades según la permisividad defensiva del rival.
+        Incluye respaldo automático de caché local e integración con ESPN Roster API.
         """
         players_map: Dict[int, PlayerPropSchema] = {}
         missing_set = {n.lower() for n in (missing_names or [])}
@@ -1084,12 +1534,14 @@ class SofascoreScraper(BaseScraperClient):
                 else:
                     starter_ids.add(lp.player_id)
 
-        if unique_tournament_id and not season_id:
+        seasons_list: List[Dict[str, Any]] = []
+        if unique_tournament_id and not season_id and not self.is_sofascore_blocked():
             try:
                 seasons_url = f"{SOFASCORE_API_BASE}/unique-tournament/{unique_tournament_id}/seasons"
                 seasons_data = self.get_json(seasons_url, ttl_hours=24.0)
                 if seasons_data and "seasons" in seasons_data and seasons_data["seasons"]:
-                    season_id = seasons_data["seasons"][0].get("id")
+                    seasons_list = seasons_data["seasons"]
+                    season_id = seasons_list[0].get("id")
             except Exception:
                 pass
 
@@ -1103,6 +1555,32 @@ class SofascoreScraper(BaseScraperClient):
             data = None
 
         tp = data.get("topPlayers", {}) if data else {}
+
+        # Si la temporada nueva aún no registra estadísticas individuales en Sofascore, probar temporada previa o caché local
+        if not tp and unique_tournament_id and not self.is_sofascore_blocked():
+            try:
+                if not seasons_list:
+                    seasons_url = f"{SOFASCORE_API_BASE}/unique-tournament/{unique_tournament_id}/seasons"
+                    seasons_data = self.get_json(seasons_url, ttl_hours=24.0)
+                    seasons_list = (seasons_data or {}).get("seasons", [])
+                for s_item in seasons_list[:3]:
+                    alt_sid = s_item.get("id")
+                    if alt_sid and alt_sid != season_id:
+                        alt_url = (
+                            f"{SOFASCORE_API_BASE}/team/{team_id}/unique-tournament/{unique_tournament_id}"
+                            f"/season/{alt_sid}/top-players/overall"
+                        )
+                        alt_data = self.get_json(alt_url, ttl_hours=12.0)
+                        if alt_data and alt_data.get("topPlayers"):
+                            tp = alt_data["topPlayers"]
+                            break
+            except Exception:
+                pass
+
+        if not tp:
+            cached_tp = self._get_cached_top_players_for_team(team_id)
+            if cached_tp:
+                tp = cached_tp
 
         def _get_or_create(entry: Dict[str, Any]) -> Optional[PlayerPropSchema]:
             p_info = entry.get("player", {})
@@ -1188,6 +1666,18 @@ class SofascoreScraper(BaseScraperClient):
                     is_missing=lp.name.lower() in missing_set,
                     is_starter=not lp.substitute,
                 )
+
+        # Si Sofascore no tenía estadísticas de jugadores para este torneo/temporada, extraer plantel y estadísticas desde ESPN API
+        if not players_map:
+            self._populate_players_from_espn_roster(
+                team_id=team_id,
+                team_name=team_name,
+                unique_tournament_id=unique_tournament_id,
+                players_map=players_map,
+                missing_set=missing_set,
+                starter_ids=starter_ids,
+                sub_ids=sub_ids,
+            )
 
         # Factor de permisividad defensiva del rival (promedio estándar = 4.2 SoT concedidos/P)
         opp_factor = 1.0

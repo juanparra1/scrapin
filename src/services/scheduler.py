@@ -221,7 +221,26 @@ class HeartbeatScheduler:
             hf = compute_team_form(m_item.home_team.id, m_item.home_team.name, home_recent)
             af = compute_team_form(m_item.away_team.id, m_item.away_team.name, away_recent)
 
-            prediction = predict_match_poisson(m_item, hf, af)
+            ut_id = m_item.tournament.unique_id or m_item.tournament.id if m_item.tournament else 0
+            s_id = m_item.season_id or 0
+            home_players = self._scraper.get_team_top_players(
+                m_item.home_team.id,
+                m_item.home_team.name,
+                ut_id,
+                s_id,
+                opp_sot_conceded_avg=af.shots_on_target_against_avg,
+            )
+            away_players = self._scraper.get_team_top_players(
+                m_item.away_team.id,
+                m_item.away_team.name,
+                ut_id,
+                s_id,
+                opp_sot_conceded_avg=hf.shots_on_target_against_avg,
+            )
+
+            prediction = predict_match_poisson(
+                m_item, hf, af, home_players=home_players, away_players=away_players
+            )
 
             # Evaluar y disparar alertas de Telegram si hay +EV relevante
             if m_item.odds:
@@ -283,8 +302,8 @@ class HeartbeatScheduler:
                     "away_form": af.model_dump(),
                     "home_recent": [r.model_dump() for r in home_recent],
                     "away_recent": [r.model_dump() for r in away_recent],
-                    "home_players": [],
-                    "away_players": [],
+                    "home_players": [hp.model_dump() for hp in home_players],
+                    "away_players": [ap.model_dump() for ap in away_players],
                     "standings_map": {},
                 },
             )
