@@ -74,7 +74,6 @@ class HeartbeatScheduler:
 
     def get_status(self) -> Dict[str, Any]:
         """Retorna el estado de salud y métricas del scheduler para la UI."""
-        now_col = datetime.now(COLOMBIA_TZ)
         last_str = self.last_run.astimezone(COLOMBIA_TZ).strftime("%H:%M:%S") if self.last_run else "Pendiente"
         next_str = self.next_run.astimezone(COLOMBIA_TZ).strftime("%H:%M:%S") if self.next_run else "Pendiente"
         mins_left = max(0, int((self.next_run - datetime.now(timezone.utc)).total_seconds() / 60)) if self.next_run else 0
@@ -166,11 +165,15 @@ class HeartbeatScheduler:
             event_ids = {b.event_id for b in pending_bets}
             scores_map: Dict[int, Dict[str, Any]] = {}
 
-            # Buscar primero en MatchRecord local
-            for eid in event_ids:
-                m_rec = session.query(MatchRecord).filter_by(event_id=eid).first()
-                if m_rec and m_rec.home_score is not None:
-                    scores_map[eid] = {
+            # Buscar primero en MatchRecord local en una sola consulta SQL
+            records = (
+                session.query(MatchRecord)
+                .filter(MatchRecord.event_id.in_(list(event_ids)))
+                .all()
+            )
+            for m_rec in records:
+                if m_rec.home_score is not None:
+                    scores_map[m_rec.event_id] = {
                         "home_score": m_rec.home_score,
                         "away_score": m_rec.away_score,
                         "status": m_rec.status_type,
@@ -181,7 +184,7 @@ class HeartbeatScheduler:
             for eid in list(missing_eids)[:6]:
                 try:
                     ev_data = self._scraper.get_json(f"https://www.sofascore.com/api/v1/event/{eid}")
-                    ev_info = ev_data.get("event", {})
+                    ev_info = (ev_data or {}).get("event", {})
                     st_type = ev_info.get("status", {}).get("type")
                     if st_type == "finished":
                         hs = ev_info.get("homeScore", {}).get("current")
@@ -225,14 +228,15 @@ class HeartbeatScheduler:
                 try:
                     from src.services.telegram_bot import check_and_alert_value_bets
                     tg_candidates = []
-                    # 1X2 EV
-                    for outcome, prob, odd_val in [
+                    # 1X2 EV (prediction.prob_* viene en escala 0-100)
+                    for outcome, prob_pct, odd_val in [
                         ("Victoria Local (1)", prediction.prob_home_win, m_item.odds.home_win),
                         ("Empate (X)", prediction.prob_draw, m_item.odds.draw),
                         ("Victoria Visitante (2)", prediction.prob_away_win, m_item.odds.away_win),
                     ]:
-                        if odd_val and odd_val > 1.0:
-                            ev = (prob * odd_val - 1.0) * 100
+                        if odd_val and odd_val > 1.0 and prob_pct:
+                            prob_dec = prob_pct / 100.0
+                            ev = (prob_dec * odd_val - 1.0) * 100.0
                             if ev >= 8.0:
                                 tg_candidates.append({
                                     "event_id": m_item.event_id,
@@ -241,21 +245,22 @@ class HeartbeatScheduler:
                                     "market_name": outcome,
                                     "odds": odd_val,
                                     "ev": ev,
-                                    "model_prob": prob,
+                                    "model_prob": prob_dec,
                                     "smart_money": bool(m_item.odds.smart_money_side),
                                 })
                     # Over 2.5
-                    if m_item.odds.over_25 and m_item.odds.over_25 > 1.0:
-                        ev_o25 = (prediction.prob_over_25 * m_item.odds.over_25 - 1.0) * 100
+                    if m_item.odds.over_2_5 and m_item.odds.over_2_5 > 1.0 and prediction.prob_over_2_5:
+                        prob_o25_dec = prediction.prob_over_2_5 / 100.0
+                        ev_o25 = (prob_o25_dec * m_item.odds.over_2_5 - 1.0) * 100.0
                         if ev_o25 >= 8.0:
                             tg_candidates.append({
                                 "event_id": m_item.event_id,
                                 "match_name": f"{m_item.home_team.name} vs {m_item.away_team.name}",
                                 "tournament": m_item.tournament.name if m_item.tournament else "Fútbol",
                                 "market_name": "Over 2.5 Goles",
-                                "odds": m_item.odds.over_25,
+                                "odds": m_item.odds.over_2_5,
                                 "ev": ev_o25,
-                                "model_prob": prediction.prob_over_25,
+                                "model_prob": prob_o25_dec,
                             })
                     if tg_candidates:
                         check_and_alert_value_bets(tg_candidates)
@@ -276,6 +281,11 @@ class HeartbeatScheduler:
                     "prediction": prediction.model_dump(),
                     "home_form": hf.model_dump(),
                     "away_form": af.model_dump(),
+                    "home_recent": [r.model_dump() for r in home_recent],
+                    "away_recent": [r.model_dump() for r in away_recent],
+                    "home_players": [],
+                    "away_players": [],
+                    "standings_map": {},
                 },
             )
             return 1

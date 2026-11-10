@@ -376,6 +376,15 @@ def save_precomputed_analysis(
         if not rec:
             rec = PrecomputedMatchRecord(event_id=event_id, match_date=match_date)
             session.add(rec)
+        elif rec.deep_analysis_json and isinstance(deep_analysis, dict):
+            # Si el scheduler refresca cuotas/predicción sin jugadores ni tabla, preservar los existentes
+            try:
+                prev_deep = json.loads(rec.deep_analysis_json)
+                for preserve_key in ("home_players", "away_players", "standings_map"):
+                    if not deep_analysis.get(preserve_key) and prev_deep.get(preserve_key):
+                        deep_analysis[preserve_key] = prev_deep[preserve_key]
+            except Exception:
+                pass
         rec.match_date = match_date
         rec.tournament_name = tournament_name
         rec.home_team_name = home_team_name
@@ -534,12 +543,18 @@ def save_portfolio_bets(bets: List[Dict[str, Any]]) -> tuple[int, int]:
     """
     Inserta una lista de apuestas de portafolio con verificación idempotente anti-rebote (SHA-256).
     Deduce el stake del libro diario (BET_PLACED) si la apuesta no existía previamente.
+    Optimizado sin consultas N+1 (1 lectura en lote para hashes y 1 para el saldo actual).
     Retorna (guardadas_exitosas, duplicadas_ignoradas).
     """
+    if not bets:
+        return 0, 0
+
     saved_count = 0
     skipped_count = 0
 
     with get_db_session() as session:
+        # 1. Pre-calcular hashes de entrada y consultar todos los existentes en 1 sola consulta SQL IN
+        candidate_hashes: List[str] = []
         for b in bets:
             b_hash = b.get("bet_hash") or PortfolioBetORM.generate_hash(
                 event_id=int(b["event_id"]),
@@ -547,11 +562,24 @@ def save_portfolio_bets(bets: List[Dict[str, Any]]) -> tuple[int, int]:
                 pick_name=str(b["pick_name"]),
                 match_date=str(b["match_date"]),
             )
+            candidate_hashes.append(b_hash)
 
-            existing = session.query(PortfolioBetORM).filter_by(bet_hash=b_hash).first()
-            if existing:
+        existing_rows = (
+            session.query(PortfolioBetORM.bet_hash)
+            .filter(PortfolioBetORM.bet_hash.in_(list(set(candidate_hashes))))
+            .all()
+        )
+        seen_hashes = {row[0] for row in existing_rows}
+
+        # 2. Obtener el saldo contable inicial una única vez antes del bucle
+        last_tx = session.query(BankrollLedgerORM).order_by(BankrollLedgerORM.id.desc()).first()
+        running_balance = last_tx.resulting_balance if last_tx else 1000.0
+
+        for b, b_hash in zip(bets, candidate_hashes):
+            if b_hash in seen_hashes:
                 skipped_count += 1
                 continue
+            seen_hashes.add(b_hash)
 
             stake = round(float(b["stake_amount"]), 2)
             odds = round(float(b["odds_taken"]), 2)
@@ -579,15 +607,11 @@ def save_portfolio_bets(bets: List[Dict[str, Any]]) -> tuple[int, int]:
             session.add(bet_orm)
             session.flush()
 
-            # Registrar deducción contable del stake en el libro diario
-            last_tx = session.query(BankrollLedgerORM).order_by(BankrollLedgerORM.id.desc()).first()
-            prev_balance = last_tx.resulting_balance if last_tx else 1000.0
-            new_balance = round(prev_balance - stake, 2)
-
+            running_balance = round(running_balance - stake, 2)
             ledger_entry = BankrollLedgerORM(
                 transaction_type="BET_PLACED",
                 amount=-stake,
-                resulting_balance=new_balance,
+                resulting_balance=running_balance,
                 description=f"Apuesta colocada: {bet_orm.pick_name} @ {bet_orm.odds_taken:.2f} ({bet_orm.event_name})",
                 bet_id=bet_orm.id,
             )

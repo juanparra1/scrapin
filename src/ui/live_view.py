@@ -1,6 +1,7 @@
 """Vista modularizada para el Escáner de Partidos EN VIVO y Gráfico de Presión (Attack Momentum)."""
 
-from typing import List
+import concurrent.futures
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -39,6 +40,30 @@ def plot_momentum_chart(
     return fig
 
 
+def _fetch_live_match_telemetry(
+    sf_scraper: SofascoreScraper, lm: MatchDetailSchema
+) -> tuple[MatchDetailSchema, Optional[LiveMomentumSummarySchema], Dict[str, Any]]:
+    """Obtiene en paralelo el gráfico de presión y estadísticas en vivo de un partido."""
+    mom = sf_scraper.get_match_momentum(lm.event_id, lm.home_team.name, lm.away_team.name)
+    st_stats = sf_scraper.get_match_statistics(lm.event_id)
+    xgh = st_stats.expected_goals_home if st_stats else None
+    xga = st_stats.expected_goals_away if st_stats else None
+    sot_h = st_stats.shots_on_target_home if st_stats else None
+    sot_a = st_stats.shots_on_target_away if st_stats else None
+
+    row = {
+        "Torneo": f"{lm.tournament.name} ({lm.tournament.country or ''})",
+        "Partido en Juego": f"{lm.home_team.name} vs {lm.away_team.name}",
+        "Marcador Vivo": f"{lm.home_score or 0} - {lm.away_score or 0} ({lm.status_description or 'Vivo'})",
+        "xG en Vivo": f"{xgh:.2f} - {xga:.2f}" if (xgh is not None and xga is not None) else "S/D",
+        "Rem. Arco Vivo": f"{sot_h} - {sot_a}" if (sot_h is not None and sot_a is not None) else "S/D",
+        "Dominador Reciente": mom.dominant_team if mom else "S/D",
+        "Nivel Alerta de Gol": mom.goal_alert_level if mom else "Normal",
+        "Diagnóstico Momentum (Últ. 10m)": mom.goal_alert_reason if mom else "Sin gráfico de presión",
+    }
+    return lm, mom, row
+
+
 def render_live_view(sf_scraper: SofascoreScraper) -> None:
     """Renderiza el escáner en vivo y gráficos de presión minuto a minuto."""
     st.subheader("🔴 Escáner de Partidos EN VIVO (Attack Momentum & Alertas de Gol Inminente)")
@@ -51,32 +76,19 @@ def render_live_view(sf_scraper: SofascoreScraper) -> None:
     st.markdown(
         f"Se detectaron **`{len(live_events)}` partidos en juego ahora mismo**. Analizando presión ofensiva (*Momentum*) en los principales..."
     )
-    live_rows = []
+    live_rows: List[Dict[str, Any]] = []
     live_with_graphs: List[tuple[MatchDetailSchema, LiveMomentumSummarySchema]] = []
 
-    for lm in live_events[:15]:
-        mom = sf_scraper.get_match_momentum(lm.event_id, lm.home_team.name, lm.away_team.name)
-        st_stats = sf_scraper.get_match_statistics(lm.event_id)
-        xgh = st_stats.expected_goals_home if st_stats else None
-        xga = st_stats.expected_goals_away if st_stats else None
-        sot_h = st_stats.shots_on_target_home if st_stats else None
-        sot_a = st_stats.shots_on_target_away if st_stats else None
+    target_live = live_events[:15]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(lambda lm: _fetch_live_match_telemetry(sf_scraper, lm), target_live)
+        )
 
+    for lm, mom, row in results:
         if mom:
             live_with_graphs.append((lm, mom))
-
-        live_rows.append(
-            {
-                "Torneo": f"{lm.tournament.name} ({lm.tournament.country or ''})",
-                "Partido en Juego": f"{lm.home_team.name} vs {lm.away_team.name}",
-                "Marcador Vivo": f"{lm.home_score or 0} - {lm.away_score or 0} ({lm.status_description or 'Vivo'})",
-                "xG en Vivo": f"{xgh:.2f} - {xga:.2f}" if (xgh is not None and xga is not None) else "S/D",
-                "Rem. Arco Vivo": f"{sot_h} - {sot_a}" if (sot_h is not None and sot_a is not None) else "S/D",
-                "Dominador Reciente": mom.dominant_team if mom else "S/D",
-                "Nivel Alerta de Gol": mom.goal_alert_level if mom else "Normal",
-                "Diagnóstico Momentum (Últ. 10m)": mom.goal_alert_reason if mom else "Sin gráfico de presión",
-            }
-        )
+        live_rows.append(row)
 
     st.dataframe(pd.DataFrame(live_rows), use_container_width=True, hide_index=True)
 

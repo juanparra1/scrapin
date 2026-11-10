@@ -26,10 +26,7 @@ from src.analytics.predictor import (
     MatchPrediction,
     TeamFormMetrics,
     _poisson_prob_over,
-    build_statistical_parlay_candidates,
-    calculate_kelly_stake,
     compute_team_form,
-    generate_smart_parlays_5x,
     predict_live_in_play,
     predict_match_poisson,
 )
@@ -126,27 +123,12 @@ def get_scrapers() -> tuple[SofascoreScraper, FlashscoreScraper]:
     )
 
 
-def render_form_badges(form_str: str) -> str:
-    if not form_str or form_str == "N/A":
-        return "<span style='color:#64748b'>Sin historial</span>"
-    html_parts = []
-    for token in form_str.split("-"):
-        if token == "W":
-            html_parts.append("<span class='badge-w'>V</span>")
-        elif token == "D":
-            html_parts.append("<span class='badge-d'>E</span>")
-        elif token == "L":
-            html_parts.append("<span class='badge-l'>D</span>")
-    return "".join(html_parts)
-
-
 from src.ui.audit_view import (
     compute_market_accuracy_breakdown,
     evaluate_all_systematic_lines_for_match,
     plot_market_accuracy_chart,
     plot_specific_lines_chart,
 )
-from src.ui.live_view import plot_momentum_chart
 
 
 _PRECOMPUTED_DEEP_MEMORY_CACHE: Dict[int, Dict[str, Any]] = {}
@@ -622,25 +604,6 @@ def analyze_matches_batch_parallel(
                 logger.error(f"Error procesando partido {team_label} en paralelo: {e}")
 
     return [results_map[i] for i in range(total) if i in results_map]
-
-
-def render_stat_comparison_bar(label: str, val_home: float, val_away: float, unit: str = "") -> None:
-    total = max(0.01, val_home + val_away)
-    pct_home = min(92.0, max(8.0, (val_home / total) * 100.0))
-    html = (
-        f"<div class='stat-compare-box notranslate' translate='no'>"
-        f"<div style='display:flex; justify-content:space-between; font-size:0.88rem; font-weight:700; margin-bottom:5px;'>"
-        f"<span style='color:#38bdf8;'>{val_home}{unit}</span>"
-        f"<span style='color:#cbd5e1;'>{label}</span>"
-        f"<span style='color:#f43f5e;'>{val_away}{unit}</span>"
-        f"</div>"
-        f"<div style='width:100%; height:7px; background:#334155; border-radius:99px; display:flex; overflow:hidden;'>"
-        f"<div style='width:{pct_home:.1f}%; background:#38bdf8; height:100%;'></div>"
-        f"<div style='width:{100.0-pct_home:.1f}%; background:#f43f5e; height:100%;'></div>"
-        f"</div>"
-        f"</div>"
-    )
-    st.markdown(html, unsafe_allow_html=True)
 
 
 @st.cache_resource

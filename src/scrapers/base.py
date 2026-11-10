@@ -5,6 +5,7 @@ import json
 import random
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
 from curl_cffi import requests as cffi_requests
@@ -12,11 +13,14 @@ from src.config import CACHE_DIR, CACHE_TTL_HOURS, DEFAULT_RATE_LIMIT_SECONDS
 
 
 class BaseScraperClient:
-    """Cliente base con huella TLS de navegador real, thread-safe, disyuntor anti-bloqueo y caché inteligente."""
+    """Cliente base con huella TLS de navegador real, thread-safe, disyuntor anti-bloqueo y caché inteligente en RAM + disco."""
 
     _sofascore_blocked_until: float = 0.0
     _sofascore_ever_succeeded: bool = False
     _sofascore_consecutive_403: int = 0
+    _ram_cache: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+    _ram_cache_lock = threading.Lock()
+    _ram_cache_max_size: int = 500
 
     def __init__(
         self,
@@ -74,6 +78,13 @@ class BaseScraperClient:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
         return CACHE_DIR / f"{digest}.json"
 
+    def _put_ram_cache(self, url: str, ts: float, data: Dict[str, Any]) -> None:
+        with self._ram_cache_lock:
+            self._ram_cache[url] = (ts, data)
+            self._ram_cache.move_to_end(url)
+            while len(self._ram_cache) > self._ram_cache_max_size:
+                self._ram_cache.popitem(last=False)
+
     def get_json(
         self,
         url: str,
@@ -81,14 +92,31 @@ class BaseScraperClient:
         allow_404: bool = True,
         retries: int = 2,
     ) -> Optional[Dict[str, Any]]:
-        """Obtiene JSON desde caché o red aplicando límite de velocidad y disyuntor rápido."""
+        """Obtiene JSON desde caché (RAM LRU -> disco) o red aplicando límite de velocidad y disyuntor rápido."""
+        now_ts = time.time()
+
+        if self.use_cache and ttl_hours is not None:
+            with self._ram_cache_lock:
+                cached_entry = self._ram_cache.get(url)
+                if cached_entry is not None:
+                    cached_ts, cached_data = cached_entry
+                    if (now_ts - cached_ts) / 3600.0 <= ttl_hours:
+                        self._ram_cache.move_to_end(url)
+                        return cached_data
+                    else:
+                        del self._ram_cache[url]
+
         cache_file = self._cache_path(url)
 
         if self.use_cache and ttl_hours is not None and cache_file.exists():
-            age_hours = (time.time() - cache_file.stat().st_mtime) / 3600.0
+            mtime = cache_file.stat().st_mtime
+            age_hours = (now_ts - mtime) / 3600.0
             if age_hours <= ttl_hours:
                 try:
-                    return json.loads(cache_file.read_text(encoding="utf-8"))
+                    disk_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    if isinstance(disk_data, dict):
+                        self._put_ram_cache(url, mtime, disk_data)
+                    return disk_data
                 except Exception:
                     pass
 
@@ -113,7 +141,8 @@ class BaseScraperClient:
                         BaseScraperClient._sofascore_ever_succeeded = True
                         BaseScraperClient._sofascore_consecutive_403 = 0
                     data = response.json()
-                    if self.use_cache and ttl_hours is not None:
+                    if self.use_cache and ttl_hours is not None and isinstance(data, dict):
+                        self._put_ram_cache(url, time.time(), data)
                         cache_file.write_text(
                             json.dumps(data, ensure_ascii=False), encoding="utf-8"
                         )
