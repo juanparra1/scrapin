@@ -212,8 +212,8 @@ class HeartbeatScheduler:
                     is_live=m_item.status_type in ("inprogress", "live")
                 )
 
-            home_recent = self._scraper.get_team_recent_matches(m_item.home_team.id)
-            away_recent = self._scraper.get_team_recent_matches(m_item.away_team.id)
+            home_recent = self._scraper.get_team_recent_matches(m_item.home_team.id, limit=6, with_stats=False)
+            away_recent = self._scraper.get_team_recent_matches(m_item.away_team.id, limit=6, with_stats=False)
 
             hf = compute_team_form(m_item.home_team.id, m_item.home_team.name, home_recent)
             af = compute_team_form(m_item.away_team.id, m_item.away_team.name, away_recent)

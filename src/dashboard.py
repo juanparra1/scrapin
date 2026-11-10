@@ -1319,51 +1319,6 @@ def load_day_catalog(date_str: str, include_all_leagues: bool) -> Dict[str, Any]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_multi_day_catalog(start_date_str: str, days: int = 6, include_all_leagues: bool = False) -> Dict[str, Any]:
-    """
-    Agrega el catálogo de partidos desde `start_date_str` hasta `start_date_str + days`
-    para mostrar toda la Ventana FIFA (UEFA Nations League, CONCACAF Nations League, Copas y Ligas)
-    sin obligar al usuario a buscar día por día.
-    """
-    base_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-    date_strs = [(base_dt + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days + 1)]
-
-    combined_matches: List[MatchDetailSchema] = []
-    seen_eids: set[int] = set()
-    combined_fs_lookup: Dict[tuple[int, int], str] = {}
-    combined_entity_links: List[Dict[str, Any]] = []
-    combined_preds: Dict[int, MatchPrediction] = {}
-    combined_deep: Dict[int, Dict[str, Any]] = {}
-    fs_total = 0
-    sources_seen: List[str] = []
-
-    for d_str in date_strs:
-        day_cat = load_day_catalog(d_str, include_all_leagues)
-        fs_total += day_cat.get("fs_total", 0)
-        if day_cat.get("source") and day_cat["source"] not in sources_seen:
-            sources_seen.append(day_cat["source"])
-        combined_fs_lookup.update(day_cat.get("fs_lookup", {}))
-        combined_entity_links.extend(day_cat.get("entity_links", []))
-        combined_preds.update(day_cat.get("precomputed_predictions", {}))
-        combined_deep.update(day_cat.get("precomputed_deep_cache", {}))
-        for m in day_cat.get("matches", []):
-            if m.event_id not in seen_eids:
-                seen_eids.add(m.event_id)
-                combined_matches.append(m)
-
-    combined_matches.sort(key=lambda m: m.start_timestamp)
-    return {
-        "matches": combined_matches,
-        "fs_total": fs_total,
-        "fs_lookup": combined_fs_lookup,
-        "entity_links": combined_entity_links,
-        "source": sources_seen[0] if sources_seen else "⚡ Supabase Turbo Cache",
-        "precomputed_predictions": combined_preds,
-        "precomputed_deep_cache": combined_deep,
-    }
-
-
-@st.cache_data(ttl=900, show_spinner=False)
 def analyze_single_match_deep(match_dict: Dict[str, Any], fs_id: str) -> Dict[str, Any]:
     """
     Extrae estadísticas profundas bajo demanda:
@@ -1611,21 +1566,7 @@ def main() -> None:
         st.divider()
 
         col_today = datetime.now(COLOMBIA_TZ).date()
-        selected_date = st.date_input("📅 1. Selecciona la Fecha (Hora Colombia)", value=col_today)
-
-        if "calendar_scope_mode" not in st.session_state:
-            st.session_state["calendar_scope_mode"] = "📅 Solo Fecha Seleccionada"
-
-        calendar_scope = st.radio(
-            "🗓️ Alcance del Calendario:",
-            options=[
-                "📅 Solo Fecha Seleccionada",
-                "🌍 Ventana FIFA / Próximos 6 Días (Nations League)",
-            ],
-            key="calendar_scope_mode",
-            help="En 'Solo Fecha Seleccionada' filtra estrictamente por la fecha en Hora Colombia (ideal para Auditoría). En 'Ventana FIFA / Próximos 6 Días' carga toda la jornada internacional (UEFA Nations League, CONCACAF Nations League, Copas y Ligas).",
-        )
-
+        selected_date = st.date_input("📅 1. Selecciona la Fecha", value=col_today)
         include_all = st.toggle(
             "🌍 Cargar ligas globales adicionales",
             value=False,
@@ -1633,25 +1574,8 @@ def main() -> None:
         )
 
         date_str = selected_date.strftime("%Y-%m-%d")
-        is_multi_day = calendar_scope.startswith("🌍")
-        if is_multi_day:
-            catalog = load_multi_day_catalog(date_str, days=6, include_all_leagues=include_all)
-        else:
-            catalog = load_day_catalog(date_str, include_all)
+        catalog = load_day_catalog(date_str, include_all)
         all_matches: List[MatchDetailSchema] = catalog["matches"]
-
-        if not is_multi_day and len(all_matches) < 5:
-            st.info(
-                "💡 **Día de concentración FIFA:** Los partidos de **UEFA Nations League** y **CONCACAF Nations League** se juegan del **12 al 15 de Noviembre**."
-            )
-            def _enable_fifa_window():
-                st.session_state["calendar_scope_mode"] = "🌍 Ventana FIFA / Próximos 6 Días (Nations League)"
-            st.button(
-                "🌍 Ver UEFA Nations League (Próximos 6 Días)",
-                on_click=_enable_fifa_window,
-                use_container_width=True,
-                type="primary",
-            )
 
         # Población automática de caché si proviene de Supabase precalculado (Ultra Rápido)
         if "precomputed_predictions" in catalog:
@@ -1670,7 +1594,7 @@ def main() -> None:
             "🏆 Filtrar por Torneo / Liga",
             options=["Todas las Ligas (" + str(len(all_matches)) + " partidos)"] + tournaments_available,
         )
-        search_team = st.text_input("🔎 Buscar equipo", placeholder="Ej. España, Francia, Inglaterra, Colombia...")
+        search_team = st.text_input("🔎 Buscar equipo", placeholder="Ej. Barcelona, Bayern, River...")
 
         filtered_matches = []
         for m in all_matches:
@@ -1693,13 +1617,11 @@ def main() -> None:
             match_options = []
             for m in filtered_matches:
                 if m.status_type == "finished":
-                    date_prefix = format_colombia_time(m.start_timestamp or m.start_time_utc, "%d/%m ") if is_multi_day else ""
-                    st_tag = f"[{date_prefix}{m.home_score}-{m.away_score} FIN]"
+                    st_tag = f"[{m.home_score}-{m.away_score} FIN]"
                 elif m.status_type == "inprogress":
                     st_tag = f"[{m.home_score}-{m.away_score} VIVO]"
                 else:
-                    fmt_str = "%d/%m %H:%M" if is_multi_day else "%H:%M"
-                    col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, fmt_str)
+                    col_time = format_colombia_time(m.start_timestamp or m.start_time_utc, "%H:%M")
                     st_tag = f"[{col_time} COL]"
                 match_options.append(
                     f"{st_tag} | {m.home_team.name} vs {m.away_team.name} ({m.tournament.name})"
@@ -1745,11 +1667,10 @@ def main() -> None:
             st.session_state.pop("attempted_odds_events", None)
             st.rerun()
 
-    # SELECTOR DE MODO SUPERIOR (7 Modos con Auditoría Destacada)
+    # SELECTOR DE MODO SUPERIOR (6 Modos con Auditoría Destacada)
     top_col1, top_col2 = st.columns([1.1, 2.9])
     with top_col1:
-        scope_label = f"{date_str} (+6d)" if is_multi_day else date_str
-        st.markdown(f"### 📅 Jornada `{scope_label}` ({len(filtered_matches)} P)")
+        st.markdown(f"### 📅 Jornada `{date_str}` ({len(filtered_matches)} P)")
     with top_col2:
         view_mode = st.radio(
             "Modo de visualización:",
